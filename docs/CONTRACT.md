@@ -102,6 +102,7 @@ archive.
 ```
 {
   workspacePath, workspaceTitle, source: 'binding' | 'detected' | 'none',
+  workspaceIsRepoRoot: boolean,
   repoRoot, repoName, head: { oid, short, subject },
   branch: { oid, head, upstream, ahead, behind, detached, unborn },
   remotes: string[],
@@ -113,6 +114,14 @@ archive.
   summaryScript
 }
 ```
+
+`workspaceIsRepoRoot` is `true` when the workspace directory is itself the root of
+the bound repository, compared through `workspaceKey` so two spellings of one
+directory do not read as different ones. It is always present: `false` when
+nothing is bound. The panel greys out its unbind button on `true`, because
+clearing the binding there changes nothing — the next read re-detects the same
+directory — and a press that reports success while changing nothing is worse than
+an inert button. Every action that returns a fresh status carries it too.
 
 `summaryScript` is the stored script for this repository, falling back to the
 `summaryScript` plugin setting, and `''` when neither exists. There is no built-in

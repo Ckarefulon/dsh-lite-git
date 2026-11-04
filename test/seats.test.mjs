@@ -405,6 +405,197 @@ test('each body also renders when its tab is hidden and when it has no session',
   }
 })
 
+test('the header says so, with a spinner, while push or fetch is running', () => {
+  const bundle = loadBundle()
+  const { ctx, seats } = createCtx()
+  bundle.apply(ctx)
+
+  const body = seats.find((seat) => seat.name === 'sidebar.right.pane.tab' && seat.key === 'dsh-lite-git/git')
+  const props = bodyProps(ctx)
+
+  const status = {
+    ok: true,
+    repoRoot: 'C:/repo',
+    repoName: 'repo',
+    branch: { head: 'main', detached: false, ahead: 1, behind: 0, upstream: 'origin/main' },
+    head: { oid: 'a'.repeat(40), short: 'aaaaaaa', subject: 'init' },
+    remotes: ['origin'],
+    lastFetchAt: '2026-01-01T09:00:00.000Z',
+    autoFetchMs: 0,
+    summaryScript: '',
+    prefs: { trashHardDelete: false, trashShowAllRepos: false, openWith: '' },
+    files: [],
+    counts: { files: 0, staged: 0, partial: 0, conflicted: 0, additions: 0, deletions: 0 },
+    primary: 'push',
+    workspacePath: 'C:/workspace',
+    workspaceIsRepoRoot: false,
+  }
+
+  // The inline dictionaries, not the key-echoing stub: half of what is being
+  // asserted here is that a sentence exists for the busy kind in both
+  // languages, which a stub answering `doing.fetch` would hide.
+  const { ZH, EN, interpolate } = bundle.internals
+  const translate = (dict) => (key, params) => interpolate(Object.prototype.hasOwnProperty.call(dict, key) ? dict[key] : key, params)
+  const t = translate(ZH)
+
+  const find = (node, predicate) => {
+    if (node === null || node === undefined || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const hit = find(child, predicate)
+        if (hit !== null) return hit
+      }
+      return null
+    }
+    if (predicate(node)) return node
+    for (const child of node.children ?? []) {
+      const hit = find(child, predicate)
+      if (hit !== null) return hit
+    }
+    return null
+  }
+  // `IconButton` takes its attributes through `props.attrs`, and this stub does
+  // not descend into components, so both spellings have to be read.
+  const attr = (node, name) => node?.props?.[name] ?? node?.props?.attrs?.[name]
+  const findAttr = (tree, name) => find(tree, (node) => attr(node, name) !== undefined)
+
+  // Order matches GitBody's `useState` calls: state, phase, error, notice, busy.
+  const render = (busy) => {
+    bundle.seed([status, 'ready', null, null, busy])
+    return bundle.renderChecked('GitBody', body.component, { ...props, t })
+  }
+
+  // Idle: the context button is a button, wearing the branch's label, and the
+  // panel says when it last fetched.
+  const idle = render(null)
+  assert.ok(findAttr(idle, 'data-lite-git-context') !== null, 'the context button is rendered when nothing is running')
+  assert.equal(findAttr(idle, 'data-lite-git-busy'), null, 'and there is no spinner')
+  assert.ok(findAttr(idle, 'data-lite-git-lastfetch') !== null, 'the last-fetch line is shown')
+
+  // A text walker, because there is no shared one in this file.
+  const textOfNode = (node) => {
+    if (node === null || node === undefined) return ''
+    if (typeof node === 'string' || typeof node === 'number') return String(node)
+    if (Array.isArray(node)) return node.map(textOfNode).join('')
+    return (node.children ?? []).map(textOfNode).join('')
+  }
+  assert.equal(textOfNode(findAttr(idle, 'data-lite-git-context')).trim(), 'Push', 'the idle button wears the branch label')
+
+  // Busy: the context button is replaced by a spinner that names the action,
+  // because a push is a network round trip of unknown length and a greyed-out
+  // button is indistinguishable from a panel that has stopped responding.
+  for (const [busy, sentence] of [
+    ['context', '正在Fetch…'],
+    ['push', '正在Push…'],
+    ['commit', '正在Commit…'],
+  ]) {
+    const tree = render(busy)
+    const spinner = findAttr(tree, 'data-lite-git-busy')
+    assert.ok(spinner !== null, `${busy} shows the spinner`)
+    assert.equal(attr(spinner, 'data-lite-git-busy'), busy, 'and says which action it is')
+    assert.equal(spinner.props.role, 'status', 'it is announced as status rather than decoration')
+    assert.equal(textOfNode(spinner).trim(), sentence, `${busy} wears a sentence naming it`)
+    assert.equal(findAttr(tree, 'data-lite-git-context'), null, 'and the button it replaces is gone')
+    assert.equal(findAttr(tree, 'data-lite-git-lastfetch'), null, 'the last-fetch line yields the room to the spinner')
+    // The spinner has to actually spin, and it has to coexist with the sentence:
+    // the slot holds the rotating arc *and* the text, not one or the other.
+    // `LoadingGlyph` is a component, so this stub can see it as a child whose
+    // `type` is a function, not the markup it would render.
+    const parts = ([]).concat(spinner.children ?? []).flat()
+    assert.equal(parts.length, 2, 'the busy slot holds the arc and the text')
+    assert.equal(typeof parts[0].type, 'function', 'the first part is the loading glyph')
+    assert.equal(parts[1].props.className, 'lite-git-busyText', 'the second is the sentence')
+  }
+
+  // Both languages can say every busy sentence, and none of them is the raw key:
+  // a missing one would render as `doing.fetch` in the user's tooltip.
+  const { busyLabel } = bundle.internals
+  for (const kind of ['fetch', 'push', 'commit', 'discard', 'stage', 'bind', 'script', 'refresh', 'context']) {
+    for (const [label, dict] of [['zh', ZH], ['en', EN]]) {
+      const text = busyLabel(kind, translate(dict))
+      assert.notEqual(text, '', `${label} has a sentence for ${kind}`)
+      assert.ok(!/^doing\./.test(text), `${label}'s ${kind} is a sentence, not a key: ${text}`)
+    }
+  }
+  // An unknown kind is a bare spinner with no invented sentence, rather than a
+  // tooltip that reads `doing.something-new`.
+  assert.equal(busyLabel('something-new', t), '')
+  assert.equal(busyLabel(null, t), '')
+})
+
+test('the unbind button greys out when the workspace is the repository itself', () => {
+  const bundle = loadBundle()
+  const { ctx, seats } = createCtx()
+  bundle.apply(ctx)
+
+  const body = seats.find((seat) => seat.name === 'sidebar.right.pane.tab' && seat.key === 'dsh-lite-git/git')
+  const props = bodyProps(ctx)
+  const { ZH, interpolate } = bundle.internals
+  const t = (key, params) => interpolate(Object.prototype.hasOwnProperty.call(ZH, key) ? ZH[key] : key, params)
+
+  const status = (workspaceIsRepoRoot) => ({
+    ok: true,
+    repoRoot: 'C:/repo',
+    repoName: 'repo',
+    branch: { head: 'main', detached: false, ahead: 0, behind: 0, upstream: null },
+    head: { oid: 'a'.repeat(40), short: 'aaaaaaa', subject: 'init' },
+    remotes: [],
+    lastFetchAt: null,
+    autoFetchMs: 0,
+    summaryScript: '',
+    prefs: { trashHardDelete: false, trashShowAllRepos: false, openWith: '' },
+    files: [],
+    counts: { files: 0, staged: 0, partial: 0, conflicted: 0, additions: 0, deletions: 0 },
+    primary: 'fetch',
+    workspacePath: 'C:/repo',
+    workspaceIsRepoRoot,
+  })
+
+  const find = (node, predicate) => {
+    if (node === null || node === undefined || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const hit = find(child, predicate)
+        if (hit !== null) return hit
+      }
+      return null
+    }
+    if (predicate(node)) return node
+    for (const child of node.children ?? []) {
+      const hit = find(child, predicate)
+      if (hit !== null) return hit
+    }
+    return null
+  }
+
+  // `IconButton` carries its attributes through `props.attrs`, and this stub
+  // does not descend into components, so both spellings have to be read.
+  const attr = (node, name) => node?.props?.[name] ?? node?.props?.attrs?.[name]
+  const findRebind = (tree) => find(tree, (node) => attr(node, 'data-lite-git-rebind') !== undefined)
+
+  const render = (workspaceIsRepoRoot) => {
+    bundle.seed([status(workspaceIsRepoRoot), 'ready', null, null, null])
+    return bundle.renderChecked('GitBody', body.component, { ...props, t })
+  }
+
+  // Workspace is a subdirectory of the repository: clearing the binding is
+  // meaningful, so the button is live.
+  const bound = findRebind(render(false))
+  assert.ok(bound !== null, 'the unbind button is rendered')
+  assert.equal(attr(bound, 'data-lite-git-rebind'), 'bound')
+  assert.equal(bound.props.disabled, false, 'it can be pressed when a binding could be cleared')
+  assert.equal(bound.props.label, '换绑仓库')
+
+  // Workspace *is* the repository root: the next read re-detects the same
+  // repository, so the unbind would succeed and change nothing. Greyed out, with
+  // a title that says why rather than leaving the user to guess.
+  const here = findRebind(render(true))
+  assert.ok(here !== null, 'the button is still rendered')
+  assert.equal(attr(here, 'data-lite-git-rebind'), 'here')
+  assert.equal(here.props.disabled, true, 'it is inert when clearing the binding could do nothing')
+  assert.equal(here.props.label, '这个工作区本身就是仓库，不用解绑')
+})
+
 test('the diff tab hands the file to a program, and the menu offers the ones the host listed', () => {
   const bundle = loadBundle()
   const { ctx, seats } = createCtx()

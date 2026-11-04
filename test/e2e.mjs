@@ -313,6 +313,10 @@ async function main() {
     eq('nothing was detected', result.body.source, 'none')
     eq('no candidates under a plain directory', result.body.candidates, [])
     eq('the workspace path comes back verbatim', result.body.workspacePath, plain)
+    // Nothing is bound, so there is no repository for the workspace to *be* the
+    // root of. The field is present rather than absent: the panel reads it on
+    // every payload, and a missing one would read as "unknown" to a strict test.
+    eq('nothing bound, so the workspace is not a repository root', result.body.workspaceIsRepoRoot, false)
     eq('a first-time user gets the safe discard default', result.body.prefs.trashHardDelete, false)
 
     await harness.expectFailure(ACTIONS.STAGE, { sessionId: SESSION, paths: ['a.txt'], staged: true }, ERROR_CODES.NO_REPO)
@@ -340,6 +344,10 @@ async function main() {
     eq('the head commit is remembered for later diffs', first.body.head.subject, 'init')
     eq('and nobody has fetched from this repository yet', first.body.lastFetchAt, null)
     eq('the status carries the rhythm the panel should fetch on', first.body.autoFetchMs, 300000)
+    // The workspace *is* the repository root here, which is the one case where
+    // the panel must grey out its unbind button: clearing the binding would just
+    // re-detect the same repository on the next read.
+    eq('the workspace is the repository root, so unbinding is offered as inert', first.body.workspaceIsRepoRoot, true)
 
     const bindings = await readState(stateDir, 'bindings.json')
     const keys = Object.keys(bindings.bindings)
@@ -769,6 +777,10 @@ async function main() {
     const after = await harness.call(ACTIONS.STATUS, { sessionId: SESSION })
     eq('the workspace now resolves to the chosen repository', after.body.repoRoot, nested)
     eq('as a binding, not a detection', after.body.source, 'binding')
+    // The workspace is a plain directory that was pointed at a repository inside
+    // it, so clearing the binding is meaningful — and the panel keeps the button
+    // live. This is the mirror of the S2 case, where the workspace is the root.
+    eq('and the workspace is not the repository root, so unbinding stays live', after.body.workspaceIsRepoRoot, false)
 
     const cleared = await harness.call(ACTIONS.BIND, { sessionId: SESSION, repoRoot: null })
     eq('clearing works', cleared.body.ok, true)

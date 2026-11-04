@@ -91,7 +91,7 @@ right column, guide page
         ↓
 ┌──────────────────────────────────┐
 │ dsh-lite-git  main   ↑1 ↓0    │  ← repository / branch / ahead·behind
-│              [Push] [↻] [🗄] [⑂]  │  ← context button, refresh, trash, rebind
+│              [Push] [↻] [🗄] [🔗]  │  ← context button, refresh, trash, unbind
 │ Changes  5 files · 2 ticked [Discard all] │
 │ ☑ M  a.txt                  +3 −1 ↩│  ← double-click = diff; ↩ = discard this file
 │ ▣ M  src/big.ts            +12 −4 ↩│  ← ▣ = half staged
@@ -121,7 +121,18 @@ right column, guide page
 - **The trash** (🗄) lists entries by time: how long ago, one file or all changes, the file count, `+n −n`, and
   `against abc1234 initial commit`. Click one for its diff, 🗑 at the end of a row deletes it, and "Empty the trash"
   clears them (only the bound repository, or everything with "Show every repository" ticked).
-- **Rebind** (⑂) clears the current binding. A workspace that is a repository re-binds itself; otherwise the picker comes back.
+- **Unbind** (🔗) clears the current binding. **The button is greyed out when the workspace *is* the
+  repository root**: clearing the binding there would only re-detect the same directory on the next read,
+  so the press would report success and change nothing. The tooltip says as much. It stays live when the
+  workspace is somewhere else — a subdirectory of a repository, or a plain folder bound to one by hand.
+
+### While a push or a fetch is running
+
+Push, fetch and commit are network round trips that can take tens of seconds. While one is in flight the
+context button in the header **turns into a spinner in place**, with a sentence beside it ("Pushing…"),
+the last-fetch line yields its room, and refresh and trash are disabled. Whatever happens — success or
+failure — the header goes back to normal afterwards. Ticking a file does *not* do this: that is a local
+`git add` of a few tens of milliseconds, and treating it as a long job would make every click feel stuck.
 
 ### What discarding actually does
 
