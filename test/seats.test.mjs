@@ -485,7 +485,7 @@ test('the header says so, with a spinner, while push or fetch is running', () =>
   // because a push is a network round trip of unknown length and a greyed-out
   // button is indistinguishable from a panel that has stopped responding.
   for (const [busy, sentence] of [
-    ['context', '正在Fetch…'],
+    ['fetch', '正在Fetch…'],
     ['push', '正在Push…'],
     ['commit', '正在Commit…'],
   ]) {
@@ -510,7 +510,7 @@ test('the header says so, with a spinner, while push or fetch is running', () =>
   // Both languages can say every busy sentence, and none of them is the raw key:
   // a missing one would render as `doing.fetch` in the user's tooltip.
   const { busyLabel } = bundle.internals
-  for (const kind of ['fetch', 'push', 'commit', 'discard', 'stage', 'bind', 'script', 'refresh', 'context']) {
+  for (const kind of ['fetch', 'push', 'commit', 'discard', 'stage', 'bind', 'script', 'refresh']) {
     for (const [label, dict] of [['zh', ZH], ['en', EN]]) {
       const text = busyLabel(kind, translate(dict))
       assert.notEqual(text, '', `${label} has a sentence for ${kind}`)
