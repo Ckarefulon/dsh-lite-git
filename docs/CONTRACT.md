@@ -209,25 +209,38 @@ by hand shows up ticked, because it is.
 
 **Which paths a refresh ticks.** The list is re-read on open, on return, and when
 the refresh button is pressed, and that re-read is where select-by-default runs.
-It runs per *path*, against the list the panel last saw:
+It runs per *path*, against what the panel last left that path as — not against
+the list as a whole, and not against the status alone:
 
 - a path that has just appeared is `git add`ed;
-- a path that was already in the list is left exactly as it is, so a refresh
-  never quietly re-takes a file the user unticked — and a new file appearing
-  never drags the previous batch back in with it;
-- the first look after a mount has no earlier list to compare against, so it
+- a path the panel left **ticked** that has changed again since reads `MM`; it is
+  `git add`ed again. The user's tick was never taken back, and the worktree simply
+  moved on underneath it. This is the case that used to be missed: an ordinary
+  edit to an already-ticked file made it `MM`, an earlier revision of this rule
+  skipped every `MM`, and the change sat uncommitted while the panel showed a
+  tick and looked refreshed;
+- a path the user **unticked** is left exactly as it is, whatever else changes.
+  A refresh is not an answer to a deliberate untick — that is why this is not
+  "tick everything again";
+- a path that is `MM` with **no tick of ours** behind it is left alone too: the
+  split was chosen elsewhere (a terminal's `git add -p`), and one tick cannot
+  express it;
+- the first look after a mount has no earlier memory to compare against, so it
   falls back to "tick everything **while the index is empty**". A non-empty index
   means a terminal, or an earlier session, already chose; re-ticking on top of a
   choice the panel cannot see the history of is the one thing it must not do
   unasked;
 - a commit forgets the remembered list, so the post-commit list is looked at as a
   first look and the remaining changes are re-offered under that same rule;
-- conflicted paths and half-staged (`MM`) paths are never ticked automatically.
-  The first would record a resolution nobody made; the second is a state somebody
-  chose that a single tick cannot express.
+- conflicted paths are never ticked automatically: `git add` there records a
+  resolution nobody made.
 
 Remembering the list is also the loop guard: the paths are recorded before the
-`git add` leaves, so a failing request does not retry on the next render.
+`git add` leaves, so a failing request does not retry on the next render. The one
+exception is a path that is still `MM` after the add — a writer that keeps the
+file dirty makes that normal — and it is guarded by the file's own size numbers
+rather than by "I tried once", so a changed file is attempted again on the next
+read and an unchanged one is not retried.
 
 ---
 

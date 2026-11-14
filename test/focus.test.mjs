@@ -225,15 +225,33 @@ function createPanel(options = {}) {
     add(file) {
       this.files.push({ staged: false, partial: false, conflicted: false, kind: 'untracked', ...file })
     },
+    /**
+     * The worktree changed under a file that is already in the list.
+     *
+     * What `git status` then says follows from whether the path is in the index
+     * already: a ticked path becomes `MM`, and an unticked one (index restored to
+     * HEAD) stays `.M`. Writing that rule down is the point — the fixture cannot
+     * be allowed to invent a status git would never print.
+     */
+    edit(path, stats = {}) {
+      const file = this.files.find((candidate) => candidate.path === path)
+      assert.notEqual(file, undefined, `the fixture has a file at ${path}`)
+      file.partial = file.staged === true
+      Object.assign(file, stats)
+    },
     /** What `git add` / `git restore --staged` did, as the host would report it. */
     apply(paths, staged) {
       const wanted = new Set(paths)
       for (const file of this.files) {
         if (!wanted.has(file.path)) continue
         file.staged = staged === true
-        file.partial = false
+        // A path being written to continuously is `MM` again the moment the add
+        // finishes, which is the one case the loop guard exists for.
+        if (!this.sticky.has(file.path)) file.partial = false
       }
     },
+    /** Paths that stay half-staged through a `git add`, as a busy writer makes them. */
+    sticky: new Set(),
     ticked(path) {
       return this.files.find((file) => file.path === path)?.staged === true
     },
@@ -534,4 +552,85 @@ test('a conflicted path is never ticked by the rule, and neither is a half-stage
   assert.deepEqual(panel.stages.at(-1), { paths: ['d.txt'], staged: true })
   assert.equal(panel.repo.ticked('clash.txt'), false)
   assert.equal(panel.repo.ticked('half.txt'), false)
+})
+
+// ------------------------------ the second edit to a file the panel ticked
+
+test('a file the panel ticked and then changed again is re-ticked on the next return', async () => {
+  // The bug this pins: tick a file, let the agent edit it again, and `git status`
+  // reads `MM`. 0.6.6 excluded every `MM` path from the rule, so the second edit
+  // never reached the index — and the panel, having a tick in front of it, looked
+  // as if it had. The tick is a statement the user never took back; the worktree
+  // merely continued under it.
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }] })
+  await panel.mount()
+  assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt', 'b.txt'], staged: true })
+
+  // The agent writes to it again while the panel is away.
+  panel.repo.edit('a.txt', { added: 3, deleted: 1 })
+  await panel.returnTo()
+
+  assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt'], staged: true })
+  // And the file comes back whole in the index, not still split.
+  assert.equal(panel.repo.files.find((file) => file.path === 'a.txt').partial, false)
+  assert.equal(panel.repo.ticked('b.txt'), true)
+})
+
+test('a file the user unticked stays unticked even after it changes again', async () => {
+  // The same story as the test above with the opposite answer, because the panel
+  // remembers an untick. An unticked path has been restored to HEAD, so a further
+  // edit reads `.M` rather than `MM` — but the point is the same one: nothing a
+  // refresh sees may put back a tick the user took away.
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }] })
+  await panel.mount()
+  await panel.untick('b.txt')
+  assert.equal(panel.repo.ticked('b.txt'), false)
+  const before = panel.stages.length
+
+  panel.repo.edit('b.txt', { added: 5, deleted: 0 })
+  await panel.returnTo()
+
+  assert.equal(panel.repo.ticked('b.txt'), false, 'the deliberate untick is still respected')
+  assert.equal(panel.stages.length, before, 'and nothing was sent for it')
+})
+
+test('a split the panel did not make is never flattened onto one tick', async () => {
+  // A terminal ran `git add -p` before the panel looked. The path is `MM` on the
+  // very first read, so there is no tick of ours behind it; staging it whole
+  // would silently discard the half-staging somebody chose.
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'half.txt', staged: true, partial: true }] })
+  await panel.mount()
+  // The first look runs the old rule, and `MM` is never part of it.
+  assert.deepEqual(panel.stages, [])
+  assert.equal(panel.repo.files.find((file) => file.path === 'half.txt').partial, true)
+
+  await panel.returnTo()
+  assert.equal(panel.repo.files.find((file) => file.path === 'half.txt').partial, true)
+  assert.equal(panel.repo.ticked('half.txt'), true)
+  assert.equal(panel.stages.length, 0)
+})
+
+test('a path that is still half-staged after the add is not re-offered in a loop', async () => {
+  // A writer that keeps the file dirty makes `git add` produce `MM` again. The
+  // guard is keyed on the size numbers, so the same numbers are attempted once
+  // and a changed file is attempted again on the next read.
+  const panel = createPanel({ files: [{ path: 'a.txt' }] })
+  await panel.mount()
+  assert.deepEqual(panel.stages, [{ paths: ['a.txt'], staged: true }])
+
+  panel.repo.sticky.add('a.txt')
+  panel.repo.edit('a.txt', { added: 1, deleted: 0 })
+  await panel.returnTo()
+  assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt'], staged: true })
+  const attempts = panel.stages.length
+
+  // Same numbers, same status: nothing new to try, so nothing is sent.
+  await panel.returnTo()
+  assert.equal(panel.stages.length, attempts, 'an unchanged MM is not retried')
+
+  // It changed again, so it is worth another try.
+  panel.repo.edit('a.txt', { added: 2, deleted: 0 })
+  await panel.returnTo()
+  assert.equal(panel.stages.length, attempts + 1)
+  assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt'], staged: true })
 })
