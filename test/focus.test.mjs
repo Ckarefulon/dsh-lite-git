@@ -239,19 +239,30 @@ function createPanel(options = {}) {
       file.partial = file.staged === true
       Object.assign(file, stats)
     },
-    /** What `git add` / `git restore --staged` did, as the host would report it. */
+    /**
+     * What `git add` / `git restore --staged` did, as the host would report it.
+     *
+     * A real `git add` either puts the whole file in the index (`M.`) or fails —
+     * it cannot report success and leave the path `MM`. A fixture that did would
+     * be describing a status git never prints, so `failNext` is the honest way to
+     * model the case that actually needs a guard: an add that did not land.
+     */
     apply(paths, staged) {
+      if (this.failNext) {
+        this.failNext = false
+        const error = new Error('the index is locked')
+        error.code = 'E_GIT_FAILED'
+        throw error
+      }
       const wanted = new Set(paths)
       for (const file of this.files) {
         if (!wanted.has(file.path)) continue
         file.staged = staged === true
-        // A path being written to continuously is `MM` again the moment the add
-        // finishes, which is the one case the loop guard exists for.
-        if (!this.sticky.has(file.path)) file.partial = false
+        file.partial = false
       }
     },
-    /** Paths that stay half-staged through a `git add`, as a busy writer makes them. */
-    sticky: new Set(),
+    /** Whether the next `git add` fails, as one does when the index is locked. */
+    failNext: false,
     ticked(path) {
       return this.files.find((file) => file.path === path)?.staged === true
     },
@@ -610,27 +621,30 @@ test('a split the panel did not make is never flattened onto one tick', async ()
   assert.equal(panel.stages.length, 0)
 })
 
-test('a path that is still half-staged after the add is not re-offered in a loop', async () => {
-  // A writer that keeps the file dirty makes `git add` produce `MM` again. The
-  // guard is keyed on the size numbers, so the same numbers are attempted once
-  // and a changed file is attempted again on the next read.
-  const panel = createPanel({ files: [{ path: 'a.txt' }] })
+test('an add that fails does not spin, and the change is retried once the file moves on', async () => {
+  // The one case that genuinely needs a loop guard: the `git add` does not land,
+  // so the file stays `MM` and every later read would ask again forever. It must
+  // be remembered as failed, and offered again only once the file has changed —
+  // the change it failed on is not worth retrying on a tight cycle.
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }] })
   await panel.mount()
-  assert.deepEqual(panel.stages, [{ paths: ['a.txt'], staged: true }])
+  assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt', 'b.txt'], staged: true })
 
-  panel.repo.sticky.add('a.txt')
+  // The worktree moves on, and the next add fails.
   panel.repo.edit('a.txt', { added: 1, deleted: 0 })
+  panel.repo.failNext = true
   await panel.returnTo()
   assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt'], staged: true })
   const attempts = panel.stages.length
 
-  // Same numbers, same status: nothing new to try, so nothing is sent.
+  // Still `MM`, nothing changed, nothing in flight: not retried.
   await panel.returnTo()
-  assert.equal(panel.stages.length, attempts, 'an unchanged MM is not retried')
+  assert.equal(panel.stages.length, attempts, 'a failed add on an unchanged file is not retried')
 
-  // It changed again, so it is worth another try.
-  panel.repo.edit('a.txt', { added: 2, deleted: 0 })
+  // The file changed since the failure, so it is worth another try — and this one
+  // succeeds.
+  panel.repo.edit('a.txt', { added: 4, deleted: 0 })
   await panel.returnTo()
   assert.equal(panel.stages.length, attempts + 1)
-  assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt'], staged: true })
+  assert.equal(panel.repo.files.find((file) => file.path === 'a.txt').partial, false)
 })

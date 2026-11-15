@@ -235,12 +235,24 @@ the list as a whole, and not against the status alone:
 - conflicted paths are never ticked automatically: `git add` there records a
   resolution nobody made.
 
-Remembering the list is also the loop guard: the paths are recorded before the
-`git add` leaves, so a failing request does not retry on the next render. The one
-exception is a path that is still `MM` after the add — a writer that keeps the
-file dirty makes that normal — and it is guarded by the file's own size numbers
-rather than by "I tried once", so a changed file is attempted again on the next
-read and an unchanged one is not retried.
+**Why re-offering does not spin.** A re-tick is offered on every read rather than
+remembered as "already offered", because a file the user ticked and that changed
+again is always worth another `git add`. That converges immediately in practice: a
+successful add lands the file as `M.`, so the next read takes the "already whole"
+branch above and asks for nothing. Two cases would otherwise loop, and only these
+two are guarded:
+
+- the read that lands while the add is still running — the path is held in an
+  in-flight set until the request settles, so a read cannot ask for it twice;
+- an add that **fails** — the file stays `MM`, so every later read would ask
+  again forever. A failed path is recorded together with the change it failed on,
+  and offered again only once the file has changed since.
+
+The earlier version of this guard keyed on the file's added/deleted counts as a
+"have I offered this already" set, and that was wrong in the other direction: a
+rewrite that leaves the counts alone reproduces the same key, so the second edit
+was filed as seen and never staged — the half-drawn tick this whole rule exists
+to prevent.
 
 ---
 
