@@ -75,8 +75,7 @@ the host sends is already user-facing (Chinese), and the browser half localises
 | `status` | `sessionId` | the whole panel state (see below), or the picker's candidate list when nothing is bound |
 | `bind` | `sessionId`, `repoRoot: string \| null` | `{ repoRoot, bound }` or `{ cleared: true }` |
 | `repos` | `sessionId` | `{ candidates, scanned, scanTruncated, repoRoot, source }` |
-| `stage` | `sessionId`, `paths: string[]`, `staged: boolean` | fresh status |
-| `commit` | `sessionId`, `summary`, `description?` | `{ commit, ...status }` |
+| `commit` | `sessionId`, `summary`, `description?`, `paths: string[]` | `{ commit, ...status }` |
 | `commitAndPush` | same | `{ commit, push: { ok, ... } , ...status }` |
 | `push` | `sessionId` | `{ action: 'push', outcome, ...status }` |
 | `fetch` | `sessionId` | `{ action: 'fetch', outcome, ...status }` |
@@ -96,6 +95,12 @@ the host sends is already user-facing (Chinese), and the browser half localises
 exactly those paths. An array that matches nothing is an `E_BAD_REQUEST`, and a
 clean working tree is refused too, so "discard nothing" never writes an empty
 archive.
+
+`paths` on `commit` is the ticked set and is **required**: an empty array is
+`E_NOTHING_STAGED`, and a `paths` that is not an array of strings is
+`E_BAD_REQUEST`. There is no "commit whatever is staged" fallback — that would be
+the old model wearing the new protocol, and it would put changes the user
+excluded into the commit.
 
 ### The status payload
 
@@ -122,6 +127,15 @@ nothing is bound. The panel greys out its unbind button on `true`, because
 clearing the binding there changes nothing — the next read re-detects the same
 directory — and a press that reports success while changing nothing is worse than
 an inert button. Every action that returns a fresh status carries it too.
+
+**`staged` and `partial` are facts about the index, not about the tick.** They
+come straight from `git status` (`index !== '.'`, and `index !== '.' && worktree
+!== '.'`), they are reported because a panel that hid what the index holds would
+be lying by omission, and `counts.staged` is the number of paths whose change is
+wholly in the index. The tick the user sees is the client's own choice (§4) and
+is derived from the excluded set instead — so `staged: false` on a row says
+nothing about whether that row is ticked, and a row with `partial: true` is drawn
+like any other. Nothing in the client reads these two fields to decide a tick.
 
 `summaryScript` is the stored script for this repository, falling back to the
 `summaryScript` plugin setting, and `''` when neither exists. There is no built-in
@@ -184,75 +198,90 @@ broken binding the user cannot clear from the UI is worse than re-deciding.
 
 ---
 
-## 4. The invariant: a tick *is* the index
+## 4. The invariant: a tick is a choice, not the index
 
-This is the claim that makes the plugin safe next to a terminal, and the claim a
-pathspec-limited commit would quietly break.
+This is GitHub Desktop's model, adopted after the earlier one ("a tick *is* the
+index") produced a state nobody could explain: a file the panel had staged and
+that then changed again reads `MM`, `MM` is indistinguishable from a half-stage
+someone performed in a terminal with `git add -p`, and the panel drew both as an
+indeterminate box. Files nobody had ticked showed up looking half-ticked, and
+after a restart the panel could not tell its own staging from a stranger's.
 
-- Ticking a file runs `git add -A -- :(literal)<path>`.
-- Unticking runs `git restore --staged -- :(literal)<path>`.
-- A file reads as ticked when **all** of its change is in the index
-  (`index !== '.'`), and as *indeterminate* when the index and the worktree are
-  both dirty (`MM`) — one tick cannot represent half a file, so the box shows a
-  dash and either click restates the file as a whole.
-- Commit runs a plain `git commit -F -` with **no pathspec**. What the panel
-  shows, what `git status` shows, and what gets committed cannot drift apart.
-- Untracked and `.gitignore`d files are never ticked: they are not in the index
-  and cannot be.
+So:
+
+- **Ticking runs no git command at all.** It is a local decision about the next
+  commit, held by the client.
+- **Unticking runs no git command either.** Same reason.
+- A file is ticked unless the user took the tick off. There is one remembered
+  thing, the *excluded* set, and it is per repository.
+- **Commit builds a temporary index** and commits from it:
+  `git read-tree HEAD` (or `read-tree --empty` when there is no commit yet), then
+  `git add -A -- :(literal)<path>` for the ticked paths, then
+  `git commit -F -` with `GIT_INDEX_FILE` pointing at that file. The real
+  `.git/index` is never read for the commit and never written by it.
+- After the commit, `git reset -q HEAD -- <literal ticked paths>` brings those
+  index entries forward to the new HEAD. That is what keeps a terminal's
+  `git status` honest about the paths that were just committed — and it is
+  path-limited, so an unrelated staged change elsewhere is untouched.
+- `.gitignore`d files are never listed, so they can never be ticked.
 
 `:(literal)` matters: without it, discarding a file named `docs` would also reach
 `docs/anything`, and a file named `a[1].txt` would be treated as a pattern.
 
-The two user-visible consequences, stated plainly: the plugin *does* mutate your
-index (that is the point — GitHub Desktop does the same), and a file you staged
-by hand shows up ticked, because it is.
+The two user-visible consequences, stated plainly: **the plugin no longer writes
+your index**, and a file you staged by hand in a terminal is neither disturbed nor
+turned into a tick — the panel's ticks are about the next commit, and the commit
+carries exactly the paths that are ticked.
 
-**Which paths a refresh ticks.** The list is re-read on open, on return, and when
-the refresh button is pressed, and that re-read is where select-by-default runs.
-It runs per *path*, against what the panel last left that path as — not against
-the list as a whole, and not against the status alone:
+**The one thing the temporary index cannot see, and the check that replaces it.**
+A temporary index seeded from HEAD has no unmerged entries, so `git add` there
+would happily stage a conflicted path's working-tree file — `<<<<<<<` markers and
+all — where the real index would have refused with `unmerged entries`. The host
+therefore asks git which paths are unmerged (`git diff --name-only
+--diff-filter=U -z`) and refuses with `E_CONFLICT`, naming the paths, if any
+ticked path is among them. The client excludes conflicts from the tick set as
+well, but the refusal does not trust that: it is a rule about what may be
+committed, not about what the panel happens to have drawn.
 
-- a path that has just appeared is `git add`ed;
-- a path the panel left **ticked** that has changed again since reads `MM`; it is
-  `git add`ed again. The user's tick was never taken back, and the worktree simply
-  moved on underneath it. This is the case that used to be missed: an ordinary
-  edit to an already-ticked file made it `MM`, an earlier revision of this rule
-  skipped every `MM`, and the change sat uncommitted while the panel showed a
-  tick and looked refreshed;
-- a path the user **unticked** is left exactly as it is, whatever else changes.
-  A refresh is not an answer to a deliberate untick — that is why this is not
-  "tick everything again";
-- a path that is `MM` with **no tick of ours** behind it is left alone too: the
-  split was chosen elsewhere (a terminal's `git add -p`), and one tick cannot
-  express it;
-- the first look after a mount has no earlier memory to compare against, so it
-  falls back to "tick everything **while the index is empty**". A non-empty index
-  means a terminal, or an earlier session, already chose; re-ticking on top of a
-  choice the panel cannot see the history of is the one thing it must not do
-  unasked;
-- a commit forgets the remembered list, so the post-commit list is looked at as a
-  first look and the remaining changes are re-offered under that same rule;
-- conflicted paths are never ticked automatically: `git add` there records a
-  resolution nobody made.
+**What a refresh does to the ticks.** Nothing. The list is re-read on open, on
+return, and when the refresh button is pressed, and the excluded set is not
+consulted for any decision about the repository nor changed by the payload that
+arrives:
 
-**Why re-offering does not spin.** A re-tick is offered on every read rather than
-remembered as "already offered", because a file the user ticked and that changed
-again is always worth another `git add`. That converges immediately in practice: a
-successful add lands the file as `M.`, so the next read takes the "already whole"
-branch above and asks for nothing. Two cases would otherwise loop, and only these
-two are guarded:
+- a path that has just appeared is ticked, because "not excluded" is the default —
+  no rule has to notice it;
+- a path the user unticked stays unticked, whatever else changes;
+- a path that is `MM` — whoever produced the split — is drawn as a plain tick,
+  because there is no third state left to draw;
+- the excluded set is pruned to the paths still in the list, so a file that is
+  committed or reverted and later reappears is ticked again rather than coming
+  back unticked for a reason the user cannot see;
+- switching the bound repository clears it, so one repository's untick is not
+  inherited by another;
+- a commit clears it: what was committed is gone, and everything remaining is
+  included next time — which is Desktop's post-commit behaviour.
 
-- the read that lands while the add is still running — the path is held in an
-  in-flight set until the request settles, so a read cannot ask for it twice;
-- an add that **fails** — the file stays `MM`, so every later read would ask
-  again forever. A failed path is recorded together with the change it failed on,
-  and offered again only once the file has changed since.
+Nothing about this can spin, because no request is involved: a click is a state
+update, and the only git process a commit starts is its own.
 
-The earlier version of this guard keyed on the file's added/deleted counts as a
-"have I offered this already" set, and that was wrong in the other direction: a
-rewrite that leaves the counts alone reproduces the same key, so the second edit
-was filed as seen and never staged — the half-drawn tick this whole rule exists
-to prevent.
+**The Shift range is one gesture with one snapshot.** A press on a row with Shift
+held ranges from the *anchor* (the row the previous press landed on) to this one
+and **inverts** every row in between against how the list looked when the batch
+started:
+
+- the anchor itself is excluded from the inversion — it is the reference point,
+  and the press that set it already settled its own tick;
+- holding Shift keeps the anchor, so pressing further along **moves the far end**
+  of one batch rather than starting a new one;
+- rows that leave the range (the pointer moved back) are restored to that
+  snapshot, not flipped a second time — which is why the plan is computed from
+  `base` and never from the current tick state;
+- letting Shift go ends the batch (a `keyup` on `window`, plus `blur` for the window
+  that loses focus before it can deliver the key-up), and the next press starts a
+  new batch whose anchor is the row it lands on;
+- a plain press also sets the anchor, because "press the first row, hold Shift,
+  press the last" is how the gesture is performed in practice;
+- conflicted paths are skipped: a tick there is consent to a resolution nobody made.
 
 ---
 
@@ -271,6 +300,10 @@ to prevent.
      tracked:   git restore --source=HEAD --staged --worktree -- <literal paths>
      untracked: delete the file, then prune directories the discard emptied
 ```
+
+A restore stages nothing: the replayed paths come back as ordinary changes, and a
+tick is the panel's choice, so they are in the list and included like anything
+else. Writing the index there would only disturb a terminal's staging.
 
 Steps 3 and 6 are not interchangeable. `git restore` destroys the original, so
 the archive has to exist first; that is the whole reason the plugin has a trash.
@@ -361,6 +394,64 @@ retaining it would buy nothing.
 quietly, because the working tree may have changed under it — an agent in the
 same session is a normal author of those changes.
 
+**The toolbar icon is the only thing outside the right column.** It is a seat in
+`conversation.session.header.utilities` — the shell's right-aligned header
+utilities, which render immediately left of the ⋯ menu — registered under
+`dsh-lite-git/header` with `order: 10`, so it lands after the shipped entries
+(`schedule-catalog` is -5) and before the menu at 0. Reusing a shipped id would
+put this seat *inside* that cell rather than beside it, which is why the id is
+ours and the slot is a `list`.
+
+It reads its count from the same `status` action the panel does, because the seat
+mounts whether or not the panel was ever opened, and a change nobody looks at is a
+change nobody commits. The count is the changed-file count; a session with no
+repository, no git, or a clean tree shows no number at all rather than a `0`.
+Pressing it calls `sidebarRight.openTabIn(sessionId, 'lite-git')`, which is the
+same door the guide card uses, so a panel already open is *shown* rather than
+duplicated. The focus re-read is debounced by 150 ms — the same rhythm the panel's
+own return read uses, for the same reason (a burst of focus events is one read).
+
+---
+
+## 7b. Drawing a diff, rather than printing one
+
+The diff tab used to render `git diff` verbatim: every line, `+` and `-` glued to
+the front of the content, `diff --git`/`index`/`---`/`+++`/`@@` printed as if they
+were source. That is the format's *encoding*, not the change. So `diffRows`
+classifies and folds:
+
+- one `file` row per file. The `diff --git`, `index`, `---`/`+++`, mode line and
+  `rename from`/`rename to` lines become its `raw` list, and its `badge`
+  (`added`/`deleted`/`renamed`/`binary`/`mode`) is derived from them. The tab
+  draws the badge as a card; the raw lines are still one press away
+  (`data-lite-git-rawtoggle`), because this tab is the only reading of a
+  discarded change once `git restore` has run — a renderer that silently dropped
+  them would be hiding information, not formatting it;
+- `hunk` rows keep the enclosing section (the text git copies after the second
+  `@@`) and drop the coordinate from the body — `@@ -12,7 +12,9 @@ function
+  render()` is a marker, not a line of the file. The section survives because it
+  is the one part a reader can use;
+- `\ No newline at end of file` is attached to the row above it (`noNewline`)
+  instead of rendering as a stray italic paragraph between two lines;
+- `+`/`-` move into a dedicated one-character column (`lite-git-sign`) beside the
+  gutter, so **the code column holds exactly what the line says**. `let x = a + b`
+  must not read as `+let x = a + b`, and the background colour is what says
+  added/removed.
+
+The header card's `+n −n` are counted from the classified rows, not from the
+payload's `added`/`deleted`: a single blob can hold several files, and those two
+numbers are for the whole diff.
+
+**The file list's directory is an rtl box around ltr text, and both halves are
+load-bearing.** `direction: rtl` on the directory box is what puts the ellipsis on
+the *left* when it has to truncate (`…/docs/guide.md` beats
+`docs/deeply/nes…/guide.md`). Applied to the text itself it also reverses the run,
+so `.test/abc` lays out as `test/abc.` — a different directory, and the widest
+thing in the row, which then overflows first and pushes the file name out of view.
+The fix is two nodes: the rtl box for the ellipsis edge, and an
+`unicode-bidi: isolate; direction: ltr` span inside it for the text. Dropping
+either one brings back one of the two symptoms.
+
 ---
 
 ## 7a. Handing a file to the user's own program
@@ -440,13 +531,21 @@ this package on the next upgrade.
 | the route carrier, single registration under a hostile service order, error classification | `test/index.test.mjs` |
 | every registration identity, the wire literals, the dictionaries, and the hook-free components' rendered trees | `test/client.test.mjs` |
 | that every registered seat **renders** — the bodies, hidden states, and no-session states | `test/seats.test.mjs` |
-| the whole host stack against **real git**, mutation by mutation | `test/e2e.mjs`, 318 assertions over 24 sections that build their own fixtures (S24 starts a real child for the open-with menu) |
+| the whole host stack against **real git**, mutation by mutation | `test/e2e.mjs`, 325 assertions over 24 sections that build their own fixtures (S24 starts a real child for the open-with menu) |
 | the manifest, the patch layer, the tarball's contents, the two copies of the wire contract, the dictionaries, the workflow | `test/check.mjs` |
 | that the client bundle would not abort the Host boot | `scripts/check-client-bundle.mjs` |
 
-The e2e suite is deliberately hostile about §4: after ticking one file it reads
-`git status --porcelain` back and asserts git agrees, which is the only way to
-show the index claim rather than assume it.
+The e2e suite is deliberately hostile about §4, in both directions:
+
+- nothing the panel does may write the index (§4) — S4 reads `git status` before
+  and after a status read and asserts it is byte-identical, and that `stage` is
+  gone from the wire;
+- a commit must contain the ticked paths and **only** those — S5 commits one path
+  while a terminal has another staged, then asserts the commit's tree holds just
+  the named path and that the terminal's staged change is still staged;
+- the temporary index cannot see a conflict, so the host must refuse one itself —
+  S12 commits a conflicted path and asserts `E_CONFLICT` naming it, plus that
+  nothing landed on the branch.
 
 ### Not verified
 
@@ -520,10 +619,10 @@ show the index claim rather than assume it.
   is killed at `graceMs` only if the command times out, and `timeoutMs` is the
   knob for that.
 - The trash keeps the diffs, not the files. Restoring replays the archived diff
-  with `git apply` and then stages the paths it produced, so a restored change
-  comes back ticked like any other changed file. A diff cut short at the archive
-  size limit, or one whose diff is only `Binary files … differ`, is refused for
-  that reason rather than restored incompletely.
+  with `git apply`; nothing is staged afterwards, so a restored change comes back
+  in the list like any other change and is ticked by the panel's default (§4). A
+  diff cut short at the archive size limit, or one whose diff is only `Binary
+  files … differ`, is refused for that reason rather than restored incompletely.
 - Binary content is not archived — the diff says `Binary files … differ`, which
   is honest but is not a backup.
 - An untracked file over `maxFileBytes` is deleted with only a stub in the

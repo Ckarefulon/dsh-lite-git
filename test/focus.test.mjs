@@ -194,7 +194,7 @@ function createPanel(options = {}) {
   }
 
   const calls = []
-  const stages = []
+  const commits = []
   let stored = options.script ?? ''
   const statusFields = {
     workspacePath: 'C:/work',
@@ -210,9 +210,10 @@ function createPanel(options = {}) {
     autoFetchMs: 0,
   }
 
-  // A working tree the test can move: the panel's tick *is* the index, so a fake
-  // host has to answer `status` from a real mutable list and let `stage` change
-  // it, or the select-by-default rule cannot be observed at all.
+  // A working tree the test can move. `status` is answered from a real mutable
+  // list, so a refresh after the tree changed is a genuine new payload rather than
+  // a replayed one — which is what the "what is ticked after a refresh" rule is
+  // about.
   const repo = {
     files: (options.files ?? []).map((file) => ({
       staged: false,
@@ -221,48 +222,23 @@ function createPanel(options = {}) {
       kind: 'modified',
       ...file,
     })),
-    /** The worktree changed: a new path shows up unticked. */
+    /** The worktree changed: a new path shows up. */
     add(file) {
       this.files.push({ staged: false, partial: false, conflicted: false, kind: 'untracked', ...file })
     },
     /**
      * The worktree changed under a file that is already in the list.
      *
-     * What `git status` then says follows from whether the path is in the index
-     * already: a ticked path becomes `MM`, and an unticked one (index restored to
-     * HEAD) stays `.M`. Writing that rule down is the point — the fixture cannot
-     * be allowed to invent a status git would never print.
+     * `staged`/`partial` describe the *index*, which the panel no longer reads for
+     * its ticks — they are kept so the fixture still looks like real `git status`
+     * output, and so a test can prove the panel ignores them. A path that is in
+     * the index and changed again reads `MM`; one that was never added stays `.M`.
      */
     edit(path, stats = {}) {
       const file = this.files.find((candidate) => candidate.path === path)
       assert.notEqual(file, undefined, `the fixture has a file at ${path}`)
-      file.partial = file.staged === true
       Object.assign(file, stats)
     },
-    /**
-     * What `git add` / `git restore --staged` did, as the host would report it.
-     *
-     * A real `git add` either puts the whole file in the index (`M.`) or fails —
-     * it cannot report success and leave the path `MM`. A fixture that did would
-     * be describing a status git never prints, so `failNext` is the honest way to
-     * model the case that actually needs a guard: an add that did not land.
-     */
-    apply(paths, staged) {
-      if (this.failNext) {
-        this.failNext = false
-        const error = new Error('the index is locked')
-        error.code = 'E_GIT_FAILED'
-        throw error
-      }
-      const wanted = new Set(paths)
-      for (const file of this.files) {
-        if (!wanted.has(file.path)) continue
-        file.staged = staged === true
-        file.partial = false
-      }
-    },
-    /** Whether the next `git add` fails, as one does when the index is locked. */
-    failNext: false,
     ticked(path) {
       return this.files.find((file) => file.path === path)?.staged === true
     },
@@ -271,7 +247,6 @@ function createPanel(options = {}) {
   const snapshot = () => repo.files.map((file) => ({ ...file }))
   const tally = () => ({
     files: repo.files.length,
-    staged: repo.files.filter((file) => file.staged === true && file.conflicted !== true).length,
     conflicted: repo.files.filter((file) => file.conflicted === true).length,
   })
   const status = () => ({ ...statusFields, files: snapshot(), counts: tally(), summaryScript: stored })
@@ -279,10 +254,12 @@ function createPanel(options = {}) {
   const answer = async (action, body) => {
     calls.push(action)
     if (action === 'status') return status()
-    if (action === 'stage') {
-      stages.push({ paths: [...body.paths], staged: body.staged === true })
-      repo.apply(body.paths, body.staged)
-      return status()
+    if (action === 'commit' || action === 'commitAndPush') {
+      commits.push({ paths: [...(body.paths ?? [])], summary: body.summary })
+      // A real commit removes the committed paths from the list.
+      const wanted = new Set(body.paths ?? [])
+      repo.files = repo.files.filter((file) => !wanted.has(file.path))
+      return { commit: { short: 'abc1234' }, ...(action === 'commitAndPush' ? { push: { ok: true } } : {}) }
     }
     if (action === 'saveScript') {
       stored = body.script
@@ -375,9 +352,17 @@ function createPanel(options = {}) {
     pump: runtime.pump,
     window,
     calls,
-    stages,
+    commits,
     repo,
     summaryValue,
+    /** The paths the panel is showing as ticked right now. */
+    ticked() {
+      return runtime
+        .elements()
+        .filter((host) => host.props['data-lite-git-tick'] !== undefined)
+        .filter((host) => host.props['aria-checked'] === 'true')
+        .map((host) => host.props['data-lite-git-tick'])
+    },
     typeSummary(value) {
       const input = runtime.elements().find((host) => host.props['data-lite-git-summary'] !== undefined)
       input.props.onChange({ target: { value } })
@@ -389,6 +374,37 @@ function createPanel(options = {}) {
       assert.ok(row !== undefined, `the row for ${path} is rendered`)
       row.props.onClick({ stopPropagation() {} })
       await runtime.pump('untick')
+    },
+    /**
+     * Press a row itself — the whole row, not its tick — optionally with Shift.
+     *
+     * A row click is what a Shift-range is measured with: pressing the tick is
+     * the same gesture for one row, but the range has to know which row the
+     * pointer landed on, and the row is the thing that carries that.
+     */
+    async clickRow(path, options = {}) {
+      const row = runtime.elements().find((host) => host.props['data-lite-git-row'] === path)
+      assert.ok(row !== undefined, `the row for ${path} is rendered`)
+      row.props.onClick({ shiftKey: options.shift === true })
+      await runtime.pump(`click ${path}`)
+    },
+    /** Let Shift go: the batch is over and the next press starts a new one. */
+    async releaseShift() {
+      const event = new Event('keyup')
+      event.key = 'Shift'
+      window.dispatchEvent(event)
+      await runtime.pump('release shift')
+    },
+    /** Press the commit button with a Summary filled in. */
+    async commit() {
+      await this.typeSummary('a commit')
+      const button = runtime
+        .elements()
+        .find((host) => host.props['data-lite-git-commit'] !== undefined && host.props.disabled !== true)
+      assert.ok(button !== undefined, 'the commit button is enabled')
+      button.props.onClick()
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      await runtime.pump('commit')
     },
     /** Fire a return and let the debounce plus the read settle. */
     async returnTo() {
@@ -487,164 +503,228 @@ test('switching the tab away and back is a return even inside the cooldown', asy
   assert.deepEqual(panel.calls, ['status', 'runScript', 'status', 'runScript'])
 })
 
-// ------------------------------------------------- which paths a refresh ticks
+// ------------------------------------------------- what a refresh ticks
+//
+// A tick is the panel's own choice, not the index, so there is no "staging"
+// request to observe any more and no memory of what the panel once staged. What
+// has to hold instead is much simpler and is what these tests pin: everything is
+// ticked unless the user said otherwise, a refresh never changes that, and the
+// box can never come back half-drawn.
 
-test('opening a repository with an empty index ticks every changed file', async () => {
+test('every changed file is ticked the moment the list arrives', async () => {
   const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }, { path: 'new.txt', kind: 'untracked' }] })
   await panel.mount()
-  assert.deepEqual(panel.stages, [{ paths: ['a.txt', 'b.txt', 'new.txt'], staged: true }])
-  assert.equal(panel.repo.ticked('new.txt'), true)
-  // One read, one select-all call, and nothing after it: the list it produced is
-  // fully ticked, so there is nothing left to offer.
-  assert.deepEqual(panel.calls, ['status', 'stage'])
+  assert.deepEqual(panel.ticked().sort(), ['a.txt', 'b.txt', 'new.txt'])
+  // Nothing was asked of the repository: the tick is local, which is the whole
+  // point — one read, and no `git add` of the user's index.
+  assert.deepEqual(panel.calls, ['status'])
+})
+
+test('a repository whose index is not empty opens fully ticked too', async () => {
+  // The old rule refused to tick anything when the index already held changes, on
+  // the theory that somebody else had chosen. A tick is now about the next commit
+  // rather than about the index, so that caution is gone: Desktop opens with
+  // everything included, and a commit built from a temporary index leaves whatever
+  // a terminal staged exactly where it was.
+  const panel = createPanel({ files: [{ path: 'a.txt', staged: true }, { path: 'b.txt' }] })
+  await panel.mount()
+  assert.deepEqual(panel.ticked().sort(), ['a.txt', 'b.txt'])
+  assert.deepEqual(panel.calls, ['status'])
 })
 
 test('a file that appears while the panel is away is ticked, and the one the user unticked is not', async () => {
   const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }] })
   await panel.mount()
-  assert.deepEqual(panel.stages.at(-1).paths, ['a.txt', 'b.txt'])
 
   // The user decides b.txt is not part of this commit.
   await panel.untick('b.txt')
-  assert.equal(panel.repo.ticked('b.txt'), false)
+  assert.deepEqual(panel.ticked(), ['a.txt'])
 
   // The worktree moves on while the panel is not being looked at.
   panel.repo.add({ path: 'c.txt', kind: 'untracked' })
   await panel.returnTo()
 
-  // Only the newcomer is ticked. Keying on the whole list — which is what this
-  // did before — would have re-ticked b.txt here, because the list no longer
-  // matched the set the guard had recorded, and that is the bug this asserts.
-  assert.deepEqual(panel.stages.at(-1), { paths: ['c.txt'], staged: true })
-  assert.equal(panel.repo.ticked('c.txt'), true)
-  assert.equal(panel.repo.ticked('b.txt'), false)
-  assert.equal(panel.repo.ticked('a.txt'), true)
+  assert.deepEqual(panel.ticked().sort(), ['a.txt', 'c.txt'])
 })
 
-test('a return with nothing new ticks nothing', async () => {
+test('a return with nothing new keeps the untick', async () => {
   const panel = createPanel({ files: [{ path: 'a.txt' }] })
   await panel.mount()
   await panel.untick('a.txt')
-  const before = panel.stages.length
+  assert.deepEqual(panel.ticked(), [])
+
   await panel.returnTo()
-  assert.equal(panel.stages.length, before, 'the untick survived the refresh')
-  assert.equal(panel.repo.ticked('a.txt'), false)
+  assert.deepEqual(panel.ticked(), [], 'the untick survived the refresh')
 })
 
-test('opening a repository whose index is not empty leaves the existing choice alone', async () => {
-  // Somebody had already curated the index — here: a.txt staged, b.txt not. The
-  // first look has no earlier list to compare against, so it must not re-tick on
-  // top of a choice it cannot see the history of.
-  const panel = createPanel({ files: [{ path: 'a.txt', staged: true }, { path: 'b.txt' }] })
+test('a conflict is never ticked, whatever the default is', async () => {
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'clash.txt', conflicted: true }] })
   await panel.mount()
-  assert.deepEqual(panel.stages, [])
-  assert.equal(panel.repo.ticked('b.txt'), false)
-
-  // From then on the list is remembered, so a newcomer is still ticked.
-  panel.repo.add({ path: 'c.txt', kind: 'untracked' })
-  await panel.returnTo()
-  assert.deepEqual(panel.stages, [{ paths: ['c.txt'], staged: true }])
+  // Committing a conflict would record a resolution nobody made.
+  assert.deepEqual(panel.ticked(), ['a.txt'])
 })
 
-test('a conflicted path is never ticked by the rule, and neither is a half-staged one', async () => {
-  const panel = createPanel({ files: [{ path: 'a.txt' }] })
+test('a file that is half staged in a terminal still reads as a plain tick', async () => {
+  // The report this whole change answers: a file nobody ticked showed up as an
+  // indeterminate box, because its index and worktree differed. The box reads the
+  // panel's choice now, so `MM` — whether this panel or a terminal produced it —
+  // has no way to draw a third state.
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'half.txt', staged: true, partial: true }] })
   await panel.mount()
-  assert.deepEqual(panel.stages, [{ paths: ['a.txt'], staged: true }])
+  assert.deepEqual(panel.ticked().sort(), ['a.txt', 'half.txt'])
 
-  // A merge clash, a path somebody half-staged in a terminal, and an ordinary
-  // newcomer, all arriving at once.
-  panel.repo.add({ path: 'clash.txt', conflicted: true })
-  panel.repo.add({ path: 'half.txt', partial: true })
-  panel.repo.add({ path: 'd.txt', kind: 'untracked' })
   await panel.returnTo()
+  assert.deepEqual(panel.ticked().sort(), ['a.txt', 'half.txt'], 'and a refresh does not change that')
 
-  // `git add` on a conflicted file records a resolution nobody made, and `MM` is
-  // a state somebody chose that one tick cannot express. Only d.txt is ticked.
-  assert.deepEqual(panel.stages.at(-1), { paths: ['d.txt'], staged: true })
-  assert.equal(panel.repo.ticked('clash.txt'), false)
-  assert.equal(panel.repo.ticked('half.txt'), false)
-})
-
-// ------------------------------ the second edit to a file the panel ticked
-
-test('a file the panel ticked and then changed again is re-ticked on the next return', async () => {
-  // The bug this pins: tick a file, let the agent edit it again, and `git status`
-  // reads `MM`. 0.6.6 excluded every `MM` path from the rule, so the second edit
-  // never reached the index — and the panel, having a tick in front of it, looked
-  // as if it had. The tick is a statement the user never took back; the worktree
-  // merely continued under it.
-  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }] })
-  await panel.mount()
-  assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt', 'b.txt'], staged: true })
-
-  // The agent writes to it again while the panel is away.
-  panel.repo.edit('a.txt', { added: 3, deleted: 1 })
-  await panel.returnTo()
-
-  assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt'], staged: true })
-  // And the file comes back whole in the index, not still split.
-  assert.equal(panel.repo.files.find((file) => file.path === 'a.txt').partial, false)
-  assert.equal(panel.repo.ticked('b.txt'), true)
+  // The index really is untouched: no request went out at all.
+  assert.deepEqual(panel.calls, ['status', 'status'])
 })
 
 test('a file the user unticked stays unticked even after it changes again', async () => {
-  // The same story as the test above with the opposite answer, because the panel
-  // remembers an untick. An unticked path has been restored to HEAD, so a further
-  // edit reads `.M` rather than `MM` — but the point is the same one: nothing a
-  // refresh sees may put back a tick the user took away.
   const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }] })
   await panel.mount()
   await panel.untick('b.txt')
-  assert.equal(panel.repo.ticked('b.txt'), false)
-  const before = panel.stages.length
 
   panel.repo.edit('b.txt', { added: 5, deleted: 0 })
   await panel.returnTo()
 
-  assert.equal(panel.repo.ticked('b.txt'), false, 'the deliberate untick is still respected')
-  assert.equal(panel.stages.length, before, 'and nothing was sent for it')
+  assert.deepEqual(panel.ticked(), ['a.txt'], 'the deliberate untick is still respected')
 })
 
-test('a split the panel did not make is never flattened onto one tick', async () => {
-  // A terminal ran `git add -p` before the panel looked. The path is `MM` on the
-  // very first read, so there is no tick of ours behind it; staging it whole
-  // would silently discard the half-staging somebody chose.
-  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'half.txt', staged: true, partial: true }] })
-  await panel.mount()
-  // The first look runs the old rule, and `MM` is never part of it.
-  assert.deepEqual(panel.stages, [])
-  assert.equal(panel.repo.files.find((file) => file.path === 'half.txt').partial, true)
-
-  await panel.returnTo()
-  assert.equal(panel.repo.files.find((file) => file.path === 'half.txt').partial, true)
-  assert.equal(panel.repo.ticked('half.txt'), true)
-  assert.equal(panel.stages.length, 0)
-})
-
-test('an add that fails does not spin, and the change is retried once the file moves on', async () => {
-  // The one case that genuinely needs a loop guard: the `git add` does not land,
-  // so the file stays `MM` and every later read would ask again forever. It must
-  // be remembered as failed, and offered again only once the file has changed —
-  // the change it failed on is not worth retrying on a tight cycle.
+test('a file that comes back with the same name after leaving the list is ticked again', async () => {
+  // Without pruning, the untick set would only ever grow: a path that was
+  // unticked, committed, and then changed again would come back unticked for a
+  // reason the user cannot see.
   const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }] })
   await panel.mount()
-  assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt', 'b.txt'], staged: true })
+  await panel.untick('b.txt')
+  assert.deepEqual(panel.ticked(), ['a.txt'])
 
-  // The worktree moves on, and the next add fails.
-  panel.repo.edit('a.txt', { added: 1, deleted: 0 })
-  panel.repo.failNext = true
+  // b.txt is reverted, so it is not in the list any more.
+  panel.repo.files = panel.repo.files.filter((file) => file.path !== 'b.txt')
   await panel.returnTo()
-  assert.deepEqual(panel.stages.at(-1), { paths: ['a.txt'], staged: true })
-  const attempts = panel.stages.length
+  assert.deepEqual(panel.ticked(), ['a.txt'])
 
-  // Still `MM`, nothing changed, nothing in flight: not retried.
+  // ...and comes back changed.
+  panel.repo.add({ path: 'b.txt' })
   await panel.returnTo()
-  assert.equal(panel.stages.length, attempts, 'a failed add on an unchanged file is not retried')
+  assert.deepEqual(panel.ticked().sort(), ['a.txt', 'b.txt'])
+})
 
-  // The file changed since the failure, so it is worth another try — and this one
-  // succeeds.
-  panel.repo.edit('a.txt', { added: 4, deleted: 0 })
-  await panel.returnTo()
-  assert.equal(panel.stages.length, attempts + 1)
-  assert.equal(panel.repo.files.find((file) => file.path === 'a.txt').partial, false)
+// -------------------------------------------------------- the Shift range
+//
+// The gesture, in the user's words: 首末点击的前后都按住 Shift 就改变中间所有的状态；
+// 不松开再点就改变端点，松开就是新一批；改变状态就是反转. So: the range runs from the
+// anchor to the pressed row *including both ends*, it inverts rather than sets,
+// and holding Shift keeps the anchor so each press only moves the far end.
+
+test('Shift-clicking a row inverts the rows between it and the anchor', async () => {
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }, { path: 'c.txt' }, { path: 'd.txt' }] })
+  await panel.mount()
+  // Everything starts ticked. Press b — that is where the batch starts — then
+  // hold Shift and press d: everything between b and d inverts, d included, so c
+  // and d come unticked. b stays as its own press left it: it is the anchor, not
+  // part of the range.
+  await panel.clickRow('b.txt')
+  assert.deepEqual(panel.ticked(), ['a.txt', 'c.txt', 'd.txt'], 'a plain press on the first row is still a plain press')
+
+  await panel.clickRow('d.txt', { shift: true })
+  assert.deepEqual(panel.ticked(), ['a.txt'], 'c and d inverted; the anchor b keeps the untick its own press gave it')
+
+  // Pressing back towards the anchor retraces the range rather than inverting it
+  // a second time: d comes back, c stays inverted.
+  await panel.clickRow('c.txt', { shift: true })
+  assert.deepEqual(panel.ticked(), ['a.txt', 'd.txt'], 'd comes back; the anchor b is still unticked from its own press')
+})
+
+test('holding Shift keeps the same anchor, so each press moves the far end', async () => {
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }, { path: 'c.txt' }, { path: 'd.txt' }] })
+  await panel.mount()
+
+  await panel.clickRow('a.txt')
+  assert.deepEqual(panel.ticked(), ['b.txt', 'c.txt', 'd.txt'])
+
+  // Hold Shift, press c then d: the anchor is still a.txt throughout, so the
+  // range grows — it does not restart from c.
+  await panel.clickRow('c.txt', { shift: true })
+  assert.deepEqual(panel.ticked(), ['d.txt'])
+  await panel.clickRow('d.txt', { shift: true })
+  assert.deepEqual(panel.ticked(), [])
+})
+
+test('letting Shift go starts a new batch from the row pressed last', async () => {
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }, { path: 'c.txt' }, { path: 'd.txt' }] })
+  await panel.mount()
+
+  // a is the anchor; Shift to d inverts b..d, so everything is unticked.
+  await panel.clickRow('a.txt')
+  await panel.clickRow('d.txt', { shift: true })
+  assert.deepEqual(panel.ticked(), [])
+
+  await panel.releaseShift()
+
+  // A new batch, measured from d — the row the last batch stopped on. Pressing b
+  // with Shift inverts c only: d is the anchor and keeps the untick it ended the
+  // last batch with, and b keeps its own state too — the range is what lies
+  // between the two ends, which is "松开就是新一批".
+  await panel.clickRow('b.txt', { shift: true })
+  assert.deepEqual(panel.ticked(), ['b.txt', 'c.txt'], 'the new range runs from the anchor d back to b, turning c on again')
+})
+
+test('a Shift range inverts each row against how it was, it does not clear the whole range', async () => {
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }, { path: 'c.txt' }, { path: 'd.txt' }] })
+  await panel.mount()
+  await panel.untick('b.txt')
+  await panel.untick('c.txt')
+  assert.deepEqual(panel.ticked(), ['a.txt', 'd.txt'])
+
+  await panel.clickRow('b.txt')
+  assert.deepEqual(panel.ticked(), ['a.txt', 'b.txt', 'd.txt'])
+
+  await panel.clickRow('d.txt', { shift: true })
+  // The range from b to d is inverted against the snapshot taken when this batch
+  // started: c was unticked and comes back, d was ticked and goes off. The anchor
+  // b keeps the tick its own press gave it.
+  assert.deepEqual(panel.ticked(), ['a.txt', 'b.txt', 'c.txt'])
+})
+
+test('a conflicted row in the middle of a range is left alone', async () => {
+  const panel = createPanel({
+    files: [{ path: 'a.txt' }, { path: 'clash.txt', conflicted: true }, { path: 'c.txt' }],
+  })
+  await panel.mount()
+  await panel.clickRow('a.txt')
+  await panel.clickRow('c.txt', { shift: true })
+  // The conflict is never ticked, so it is neither part of the range nor counted
+  // as one of the rows the range turned off.
+  assert.deepEqual(panel.ticked(), [])
+  assert.deepEqual(panel.calls, ['status'], 'no request went out: a tick is a local choice')
+})
+
+// ------------------------------------------------------ what a commit sends
+
+test('the commit carries exactly the ticked paths', async () => {
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }, { path: 'c.txt' }] })
+  await panel.mount()
+  await panel.untick('b.txt')
+
+  await panel.commit()
+
+  assert.equal(panel.commits.length, 1)
+  assert.deepEqual(panel.commits[0].paths, ['a.txt', 'c.txt'], 'only the ticked ones')
+  assert.equal(panel.commits[0].summary, 'a commit')
+})
+
+test('everything left is ticked again after a commit', async () => {
+  // Desktop rebuilds the working-directory list and includes every new file; the
+  // equivalent here is that the untick set empties, so anything that survived a
+  // partly-ticked commit is included next time.
+  const panel = createPanel({ files: [{ path: 'a.txt' }, { path: 'b.txt' }] })
+  await panel.mount()
+  await panel.untick('b.txt')
+  await panel.commit()
+  assert.deepEqual(panel.commits.at(-1).paths, ['a.txt'])
+
+  // b.txt is the only change left, and it is not excluded any more.
+  assert.deepEqual(panel.ticked(), ['b.txt'])
 })

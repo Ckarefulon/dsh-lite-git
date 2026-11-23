@@ -206,8 +206,28 @@ function createCtx() {
   return { ctx, seats, tabDefs }
 }
 
-/** The props the shell hands a body: the translator, the ctx, and the tab hook. */
-function bodyProps(ctx, overrides = {}) {
+/** Depth-first search over a stub tree — the React stub leaves children in arrays. */
+function walkers() {
+  const findFirst = (node, predicate) => {
+    if (node === null || node === undefined || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const hit = findFirst(child, predicate)
+        if (hit !== null) return hit
+      }
+      return null
+    }
+    if (predicate(node)) return node
+    for (const child of node.children ?? []) {
+      const hit = findFirst(child, predicate)
+      if (hit !== null) return hit
+    }
+    return null
+  }
+  return { findFirst }
+}
+
+/** The props the shell hands a body: the translator, the ctx, and the tab hook. */function bodyProps(ctx, overrides = {}) {
   const tab = {
     sessionId: 'session-seats',
     visible: true,
@@ -268,6 +288,60 @@ test('every seat renders without throwing', () => {
   }
 })
 
+test('the conversation header gets an icon, beside the overflow menu', () => {
+  const bundle = loadBundle()
+  const { ctx, seats } = createCtx()
+  bundle.apply(ctx)
+  const { findFirst } = walkers()
+
+  const seat = seats.find((row) => row.name === 'conversation.session.header.utilities')
+  assert.ok(seat !== undefined, 'the toolbar icon is registered')
+  assert.equal(seat.id, bundle.internals.HEADER_ICON_ID, 'under its own id, not a shipped one')
+  assert.ok(seat.order > 0, 'after the shipped entries (schedule sits at -5, the ⋯ menu at 0)')
+  assert.equal(seat.locale, 'dsh-lite-git')
+
+  const props = bodyProps(ctx)
+  // Loading state first, then the press: a hook below an early return would be
+  // rejected by React and blank the header.
+  bundle.seed([null, false])
+  const icon = bundle.renderChecked('HeaderIcon', seat.component, props)
+
+  // It is a button with the toolbar's chrome, and it carries no count yet.
+  assert.equal(icon.type, 'button')
+  assert.ok(icon.props.className.includes('lite-git-headerIcon'), icon.props.className)
+  assert.equal(icon.props['data-lite-git-headericon'], '')
+
+  // A count of three is what the badge reads, and what the tooltip says.
+  bundle.seed([3, false])
+  const counted = bundle.renderChecked('HeaderIcon', seat.component, props)
+  assert.equal(counted.props['data-lite-git-headericon'], '3')
+  assert.ok(counted.props.className.includes('lite-git-headerIcon-active'))
+  assert.ok(String(counted.props.title).includes('panel.changes'), String(counted.props.title))
+
+  // An empty working tree has no badge: a "0" beside the icon would read as
+  // something waiting when nothing is.
+  bundle.seed([0, false])
+  const quiet = bundle.renderChecked('HeaderIcon', seat.component, props)
+  assert.equal(quiet.props['data-lite-git-headericon'], '0')
+  assert.ok(!quiet.props.className.includes('lite-git-headerIcon-active'))
+  assert.equal(findFirst(quiet, (node) => node.props?.className === 'lite-git-headerBadge'), null)
+})
+
+test('the header icon opens the panel in the session’s own right column', () => {
+  const bundle = loadBundle()
+  const { ctx, seats } = createCtx()
+  const opened = []
+  ctx.sidebarRight.openTabIn = (sessionId, kind) => opened.push([sessionId, kind])
+  bundle.apply(ctx)
+
+  const seat = seats.find((row) => row.name === 'conversation.session.header.utilities')
+  bundle.seed([2, false])
+  const icon = bundle.renderChecked('HeaderIcon', seat.component, bodyProps(ctx))
+  icon.props.onClick()
+
+  assert.deepEqual(opened, [['session-seats', 'lite-git']], 'the press shows the Git tab in this session')
+})
+
 test('every toast the panel can show has copy in both languages', () => {
   const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
 
@@ -326,7 +400,12 @@ test('the panel header offers a select-all box, and it reflects the selection', 
   // first on purpose: it is the one that skips every hook below the early return,
   // so comparing the two hook counts is what catches a hook that only exists on
   // the loaded path — which is the bug that blanked the panel in 0.5.4.
-  const renderWith = (files) => {
+  // The selection is the panel's own choice now, not a field of the status
+  // payload: every changed file starts ticked and the user's untick is the
+  // exception. So these renders drive the header through the `excluded` set,
+  // which is the sixth `useState` in `GitBody` (state, phase, error, notice,
+  // busy, excluded).
+  const renderWith = (files, excluded = new Set()) => {
     const bundle = loadBundle()
     const { ctx, seats } = createCtx()
     bundle.apply(ctx)
@@ -336,7 +415,7 @@ test('the panel header offers a select-all box, and it reflects the selection', 
     bundle.seed([null, 'loading'])
     bundle.renderChecked('GitBody', body.component, props)
 
-    bundle.seed([status(files), 'ready'])
+    bundle.seed([status(files), 'ready', null, null, null, excluded])
     return bundle.renderChecked('GitBody', body.component, props)
   }
 
@@ -360,17 +439,17 @@ test('the panel header offers a select-all box, and it reflects the selection', 
     return null
   }
 
-  const none = findSelectAll(renderWith([file('a.txt', false), file('b.txt', false)]))
+  const none = findSelectAll(renderWith([file('a.txt', false), file('b.txt', false)], new Set(['a.txt', 'b.txt'])))
   assert.ok(none !== null, 'the header tick is rendered')
   assert.equal(none.props['data-lite-git-selectall'], 'none')
   assert.equal(none.props['aria-checked'], 'false')
   assert.equal(none.props.disabled, false, 'it is clickable when there is something to tick')
 
-  const some = findSelectAll(renderWith([file('a.txt', true), file('b.txt', false)]))
+  const some = findSelectAll(renderWith([file('a.txt', false), file('b.txt', false)], new Set(['b.txt'])))
   assert.equal(some.props['data-lite-git-selectall'], 'some')
   assert.equal(some.props['aria-checked'], 'mixed', 'a partial selection reads as mixed')
 
-  const all = findSelectAll(renderWith([file('a.txt', true), file('b.txt', true)]))
+  const all = findSelectAll(renderWith([file('a.txt', false), file('b.txt', false)]))
   assert.equal(all.props['data-lite-git-selectall'], 'all')
   assert.equal(all.props['aria-checked'], 'true')
 

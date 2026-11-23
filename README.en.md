@@ -2,7 +2,7 @@
 
 **A GitHub Desktop-style Git panel for DSH**, living in DSH's **built-in right sidebar** — beside Files, Document and Chat.
 
-Changed files, tick-to-stage, a Summary plus a collapsible Description, Commit and Commit and Push, one context button that is Push or Fetch depending on the branch, a discard that archives into the plugin's own trash, and a diff preview — all in that column.
+Changed files, ticks that say what goes into the next commit, a Summary plus a collapsible Description, Commit and Commit and Push, one context button that is Push or Fetch depending on the branch, a discard that archives into the plugin's own trash, and a diff preview — all in that column.
 
 > 中文：[README.md](./README.md)
 
@@ -22,12 +22,14 @@ The column is narrow (300px minimum, and a narrow viewport makes it full-screen)
 | | |
 |---|---|
 | Change list | Modified, added, deleted, renamed and untracked, each with its `+n −n` line counts |
-| Ticking | **A tick is a real `git add`**; unticking is `git restore --staged`. What a terminal's `git status` shows is the same thing |
-| Half-staged files | When the index and the worktree are both dirty the tick renders indeterminate; either click restates the file as a whole |
-| Select all | A tri-state box left of the list heading: tick everything, untick everything, and it reads as mixed when the selection is partial. **Conflicted files are excluded**, the same rule the automatic selection follows |
-| Automatic selection | **Whatever you have not unticked stays ticked on your behalf.** After the list is re-read: changes that have just appeared are ticked, and **a file you had ticked and that then changed again (the half-ticked ▣ row) is `git add`ed again** — so a file being edited under you cannot quietly drop out of the commit. What you unticked by hand stays unticked. Two things never take part: conflicted files, and a half-staged split **this panel did not make** (a terminal's `git add -p`, which one tick cannot express). **The first look** (and the one right after a commit) keeps the original opening rule: tick everything while the index is empty; a non-empty index means someone already chose, so it is left alone |
+| Ticking | **A tick is a choice about the next commit, and it never touches your index** — the GitHub Desktop model. Clicking only adds or removes the tick; no `git add` runs, and a terminal's `git status` does not change because of it |
+| Indeterminate rows | There is exactly one case: you unticked some of the files yourself. Whatever the index holds — including a half-stage from a terminal's `git add -p` — cannot make a row look half-ticked. A row has two states, ticked and not |
+| Select all | A tri-state box left of the list heading: tick everything, untick everything, and it reads as mixed when you have unticked some. **Conflicted files are excluded** |
+| Ticked by default | **Everything is ticked when the list opens**, and so is anything that appears later — "not unticked" is the default, so no rule has to chase it. What you unticked stays unticked, and a re-read never puts it back. Switching repository or finishing a commit starts from all-ticked again |
+| What a commit contains | **Exactly the ticked paths.** The host builds a temporary index from `HEAD` plus those paths and commits from it, so it **never reads and never rewrites your real index** — whatever a terminal staged is still staged afterwards |
+| Conflicts | Committing is refused while anything is unresolved, and the refusal names the file. The temporary index has no conflict entries to protect it, so the host checks for this itself |
 | Summary / Description | Summary is one always-visible line; the triangle at its right reveals Description |
-| Commit | Commits exactly what is ticked — because ticking wrote the index |
+| Commit | Commits the ticked files; it never runs `git add` |
 | Commit and Push | Commits, then pushes. **A failed push never claims the commit failed**: the commit happened, and the panel says "committed `abc1234`, but the push failed" |
 | Context button | **Push** when local commits are unpushed, **Publish** when the branch has no upstream, **Fetch** otherwise |
 | Fetch before push | A push runs `git fetch --prune` first, then pushes. **Being behind refuses the push** and says by how many — git never merges on a push, so it would be rejected either way, and knowing before the attempt beats being told after. A failed fetch does not block the push |
@@ -35,7 +37,7 @@ The column is narrow (300px minimum, and a narrow viewport makes it full-screen)
 | Panel regains focus | **Every time the panel is looked at again** the file list is re-read and the script fills the Summary: **opening the panel**, switching back to this tab, clicking into the panel from the conversation, returning to the DSH window, or coming back to the browser tab. A Summary you typed is never replaced — only an empty one, or one that still holds what the script itself wrote, is filled |
 | Discard | One file or all of them; the diff is archived *before* anything is restored, and the confirmation offers "delete for good" |
 | Trash | Its own tab. Every discard keeps a diff, recorded **against the commit it was taken from** (`abc1234 initial commit`) |
-| Diff preview | Double-click a file, or a trash entry, to open a diff tab in the column — **one tab, ever**, re-navigated in place |
+| Diff preview | Double-click a file, or a trash entry, to open a diff tab in the column — **one tab, ever**, re-navigated in place. It is **drawn**, not pasted: one header card per file (path, a `New file`/`Deleted file`/`Renamed`/`Mode changed`/`Binary` badge, `+n −n`), then the code with **green rows for additions and red for deletions, a two-column line-number gutter**, and `+`/`−` in a one-character column of its own instead of glued onto the text. `diff --git`/`index`/`---`/`+++` fold into the card — the `›` at its end still reveals every raw line, so nothing is lost |
 | Open in another program | A button in the diff tab's top-right corner opens the file in **the program used last**; the caret beside it lists everything available: the system default, Notepad, and "show in folder". The program starts on the **host** — so on a phone over Tailscale the window opens on the computer — and the panel says "opened with Notepad" so that is not a guess. Add your own editor with `openWith` in the config |
 | Repository binding | A workspace that is itself a repository binds automatically and is remembered; otherwise pick from the repositories found under the workspace, or type a path |
 
@@ -93,10 +95,11 @@ right column, guide page
 │ dsh-lite-git  main   ↑1 ↓0    │  ← repository / branch / ahead·behind
 │              [Push] [↻] [🗄] [🔗]  │  ← context button, refresh, trash, unbind
 │ Changes  5 files · 2 ticked [Discard all] │
-│ ☑ M  a.txt                  +3 −1 ↩│  ← double-click = diff; ↩ = discard this file
-│ ▣ M  src/big.ts            +12 −4 ↩│  ← ▣ = half staged
-│ ☐ ?  new note.md             +7   ↩│
-│ ☐ D  docs/old.md             −31  ↩│
+│ ☑ M  a.txt                  +3 −1 ↩│  ← click = tick; double-click = diff; ↩ = discard
+│ ☑ M  src/big.ts            +12 −4 ↩│
+│ ☑ ?  new note.md             +7   ↩│
+│ ☐ D  docs/old.md             −31  ↩│  ← the one you unticked stays out of this commit
+│ ☑ R  moved.txt                    ↩│
 │ ┌────────────────────────────┐ ˅ │  ← ˅ reveals Description
 │ │ Summary (required)          │   │
 │ └────────────────────────────┘   │
@@ -104,7 +107,9 @@ right column, guide page
 └──────────────────────────────────┘
 ```
 
-- **Ticking** writes the index; unticking takes it back out. An indeterminate file ticks as a whole, and a second click unticks it as a whole.
+- **The toolbar icon** sits in the conversation header's top right — the row with the ⋯ menu and the sidebar toggle — and carries the number of changed files. One press opens the Git panel in that session's right column, so you never have to find the tab first. No repository bound, or a clean tree, means no number.
+- **Ticking** only adds or removes the tick, from anywhere on the row (no need to hit the small box). It runs no git command and leaves your index alone; a commit takes exactly the ticked files.
+- **Shift-clicking** does what it does in every file list: press the first file, hold Shift, press the last one, and everything **between them is inverted** — on stays on, off goes on. Keep holding and press again and the far end moves (the anchor does not), so pressing further extends the same batch and pressing back retracts it, rows returning to the state they started in. Let Shift go and the next press starts a new batch from where you stopped. The anchor keeps the state its own press gave it, so "first to last" gives you "the middle inverted", not "select all"/"select none". Conflicted files never take part.
 - **Double-click a row** opens the diff tab; double-clicking another file **reuses that same tab**.
 - **Discard** (the ↩ at the end of a row, or "Discard all") opens a confirmation:
 
@@ -131,8 +136,8 @@ right column, guide page
 Push, fetch and commit are network round trips that can take tens of seconds. While one is in flight the
 context button in the header **turns into a spinner in place**, with a sentence beside it ("Pushing…"),
 the last-fetch line yields its room, and refresh and trash are disabled. Whatever happens — success or
-failure — the header goes back to normal afterwards. Ticking a file does *not* do this: that is a local
-`git add` of a few tens of milliseconds, and treating it as a long job would make every click feel stuck.
+failure — the header goes back to normal afterwards. Ticking a file does *not* do this, because it sends no
+request at all: the tick is the panel's own choice about the next commit.
 
 ### What discarding actually does
 
@@ -268,15 +273,16 @@ npm run test:live # probe a running DSH (not part of npm test; needs the app run
 | `test/index.test.mjs` | Config fields and defaults, **the route carrier and single registration**, error-code mapping |
 | `test/client.test.mjs` | the real bundle loaded from the manifest's exact path; the three tab types' ids/kinds/guide/keepMounted; every slot key being a registered id; both dictionaries and every failure code; the three hook-free components asserted on their element trees |
 | `test/seats.test.mjs` | **every registered seat rendered**, including hidden and no-session states. This one closes a blind spot: `client.test.mjs` never renders the three bodies, and a render-time error in a body blanks the whole panel — which really happened (a `const` named by a dependency array before it was declared threw a ReferenceError and white-screened the panel while the rest of the suite stayed green) |
-| `test/focus.test.mjs` | **the only suite that runs effects**: the real bundle against a small React (state, effects with dependency comparison, callbacks, refs), asserting that "looked at again" really happens — one read on open, another on a return, a burst of returns read once, switching the tab away and back counting too — and, after a re-read, **which files get ticked**: the newcomers, never a file the user unticked, and no override of somebody else's choice on an index that is not empty. No other suite runs effects, so they cannot see this class of bug |
-| `test/e2e.mjs` | real git through the real handler and route layers: ticking really writes the index (read back with `git status`), commit, push to a local bare remote, a rejected push, discarding one file / everything / a rename / a staged delete, conflict refusal, trash add-delete-clear, per-repository filtering, scan depth |
+| `test/focus.test.mjs` | **the only suite that runs effects**: the real bundle against a small React (state, effects with dependency comparison, callbacks, refs), asserting that "looked at again" really happens — one read on open, another on a return, a burst of returns read once, switching the tab away and back counting too — and **where the tick state comes from**: everything ticked on open, an untick surviving a refresh, a newcomer arriving ticked, a path that left the list dropping its memory, and a commit carrying exactly the ticked paths. No other suite runs effects, so they cannot see this class of bug |
+| `test/e2e.mjs` | real git through the real handler and route layers: reading a status **leaves the index byte-identical**, a commit contains only the ticked paths (and leaves a terminal's own staging alone), a conflict is refused by the host and named, push to a local bare remote, a rejected push, discarding one file / everything / a rename / an added-then-deleted file, trash add-delete-clear, per-repository filtering, scan depth |
 | `test/check.mjs` | the manifest's targets all exist and reach the tarball, the patch layer is one row with no secret, the two copies of the wire contract agree, the dictionaries agree with `locale/*.json`, every `t('literal')` resolves, the README and workflow are present and say the right things |
 | `scripts/check-client-bundle.mjs` | reproduces client-modules' resolution: does the file `exports["./client"]` names actually exist |
 
 **There is no real-browser harness**, deliberately: this plugin measures no DOM, augments no host DOM, and portals
 nothing to `document.body`, and the fixture's fidelity is itself a cost — plugins in this family have had a bug
 frozen green because the fixture copied a CSS rule wrong. The three components with no hooks in them *are* asserted
-on their rendered trees, which covers the rules that matter (a tick reflects the index, the confirmation defaults to
+on their rendered trees, which covers the rules that matter (a tick follows the panel's choice rather than the index,
+the confirmation defaults to
 keeping a copy, the picker lists its candidates). If the UI ever grows something hover-dependent or measured, that
 judgement should be revisited; it is recorded in `docs/CONTRACT.md`.
 
@@ -290,9 +296,9 @@ judgement should be revisited; it is recorded in `docs/CONTRACT.md`.
 - The trash keeps **that one diff**. Restoring replays it with `git apply`, which reproduces the exact bytes (verified
   with CRLF, no trailing newline, unicode, and trailing spaces). It replays only while the working tree is still what
   the discard left: if HEAD moved, or the files were touched since, the button greys out and says which — otherwise a
-  stale change would land on top of newer work. **A restored change comes back ticked**: the host stages the paths the
-  replay produced, which is the same "every changed file is ticked by default" rule and the same meaning a tick has
-  everywhere else here (a real `git add`), so a terminal's `git status` agrees. **A successful restore removes the
+  stale change would land on top of newer work. **A restored change is back in the list, ticked by the default rule**:
+  the replay only writes bytes into the working tree and never touches the index, so a restored file is an ordinary
+  change and is ticked for the same reason every other change is. **A successful restore removes the
   entry**: it is the reverse of the discard that made it, so once the change is back the archive has no use, and
   replaying it again would apply the same change twice.
 - Binary content is not archived; the diff says `Binary files … differ`. That is honest, and it is not a backup.

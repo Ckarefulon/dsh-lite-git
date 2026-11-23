@@ -319,7 +319,7 @@ async function main() {
     eq('nothing bound, so the workspace is not a repository root', result.body.workspaceIsRepoRoot, false)
     eq('a first-time user gets the safe discard default', result.body.prefs.trashHardDelete, false)
 
-    await harness.expectFailure(ACTIONS.STAGE, { sessionId: SESSION, paths: ['a.txt'], staged: true }, ERROR_CODES.NO_REPO)
+    await harness.expectFailure(ACTIONS.COMMIT, { sessionId: SESSION, summary: 'x', paths: ['a.txt'] }, ERROR_CODES.NO_REPO)
     await harness.expectFailure(ACTIONS.STATUS, {}, ERROR_CODES.BAD_REQUEST)
     await harness.expectFailure(ACTIONS.STATUS, { sessionId: 'nope' }, ERROR_CODES.NO_WORKSPACE)
   }
@@ -400,78 +400,124 @@ async function main() {
     eq('nothing is staged yet', result.body.counts.staged, 0)
   }
 
-  // ------------------------------------------------------------- S4: the index
+  // ------------------------------------------------- S4: ticks are not the index
 
-  section('S4 a tick is the real index, and git agrees')
+  section('S4 a tick is a choice, so nothing the panel does writes the index')
   {
     const workspace = join(scratch, 'repo-changes')
     const harness = createHarness({ workspacePath: workspace, stateDir: join(scratch, 'state-4') })
 
-    const staged = await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['a.txt'], staged: true })
-    eq('stage is ok', staged.body.ok, true)
-    eq('the ticked file now reads as staged', harness.fileOf(staged.body, 'a.txt')?.staged, true)
+    // The tree this section shares with S3 still holds three changes and nothing
+    // staged. Reading the panel must not stage anything, which is the difference
+    // between this model and the old one.
+    const before = await realStatus(workspace)
+    const read = await harness.call(ACTIONS.STATUS, { sessionId: SESSION })
+    eq('status is ok', read.body.ok, true)
+    eq('every change is in the list', read.body.files.length, 3)
+    ok('and the index is exactly as it was', JSON.stringify(await realStatus(workspace)) === JSON.stringify(before), before)
 
-    const porcelain = await realStatus(workspace)
-    ok('git itself shows a.txt staged', porcelain.some((record) => record === 'M  a.txt'), porcelain)
-    ok('the untracked file is still untracked', porcelain.some((record) => record === '?? untracked new.txt'), porcelain)
-    ok('the deleted file is still unstaged', porcelain.some((record) => record === ' D docs/guide.md'), porcelain)
-
-    const unstaged = await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['a.txt'], staged: false })
-    eq('unticking clears it again', harness.fileOf(unstaged.body, 'a.txt')?.staged, false)
-    ok('git agrees the index is empty again', (await realStatus(workspace)).some((record) => record === ' M a.txt'))
-
-    // A deletion stages and unstages like anything else.
-    const stagedDelete = await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['docs/guide.md'], staged: true })
-    eq('a deletion can be staged', harness.fileOf(stagedDelete.body, 'docs/guide.md')?.staged, true)
-    ok('git shows it as a staged delete', (await realStatus(workspace)).some((record) => record === 'D  docs/guide.md'))
-
-    // A path git does not know at all must fail loudly, not silently succeed.
-    const bogus = await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['no/such/file.txt'], staged: true })
-    ok('staging an unknown path fails loudly', bogus.body.ok === false || bogus.status >= 400, bogus.body)
-
-    await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['docs/guide.md'], staged: false })
+    // `stage` is gone from the wire. A stale caller gets an unknown-action error
+    // rather than silently doing something to the index.
+    const gone = await harness.call('stage', { sessionId: SESSION, paths: ['a.txt'], staged: true })
+    eq('the stage action no longer exists', gone.body.ok, false)
+    eq('and is reported as an unknown action', gone.body.error?.code, ERROR_CODES.UNKNOWN_ACTION)
   }
 
   // ---------------------------------------------------------------- S5: commit
 
-  section('S5 commit: the message goes in over stdin, the body survives')
+  section('S5 commit: a temporary index, and the message goes in over stdin')
   {
     const workspace = await freshRepo('repo-commit')
     const harness = createHarness({ workspacePath: workspace, stateDir: join(scratch, 'state-5') })
 
     await put(join(workspace, 'a.txt'), 'one\ntwo\nthree\nfour\n')
-    await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['a.txt'], staged: true })
 
+    // No `git add` anywhere: the tick travels as `paths` and the host builds the
+    // commit from a temporary index seeded with HEAD.
     const committed = await harness.call(ACTIONS.COMMIT, {
       sessionId: SESSION,
       summary: 'from the panel',
       description: 'a body line\n\nand a second paragraph',
+      paths: ['a.txt'],
     })
     eq('commit is ok', committed.body.ok, true)
     eq('summary echoed back', committed.body.commit.summary, 'from the panel')
     ok('a commit oid came back', typeof committed.body.commit.oid === 'string' && committed.body.commit.oid.length > 7)
     eq('the status refreshed in the same call', committed.body.counts.files, 0)
+    eq('and the committed paths are reported back', committed.body.commit.paths, ['a.txt'])
 
     const log = await git(workspace, ['log', '-1', '--pretty=%s%n---%n%b'])
     ok('git stored the summary', log.stdout.includes('from the panel'), log.stdout)
     ok('git stored the description as the body', log.stdout.includes('a second paragraph'), log.stdout)
 
-    await harness.expectFailure(ACTIONS.COMMIT, { sessionId: SESSION, summary: '   ', description: '' }, ERROR_CODES.EMPTY_SUMMARY)
-    await harness.expectFailure(ACTIONS.COMMIT, { sessionId: SESSION, summary: 'nothing staged' }, ERROR_CODES.NOTHING_STAGED)
+    // The real index is clean too — the commit went through a temporary one, and
+    // the path it committed was reset to the new HEAD.
+    ok('the real index is clean afterwards', (await realStatus(workspace)).length === 0, await realStatus(workspace))
+
+    await harness.expectFailure(
+      ACTIONS.COMMIT,
+      { sessionId: SESSION, summary: '   ', description: '', paths: ['a.txt'] },
+      ERROR_CODES.EMPTY_SUMMARY,
+    )
+    await harness.expectFailure(
+      ACTIONS.COMMIT,
+      { sessionId: SESSION, summary: 'nothing ticked', paths: [] },
+      ERROR_CODES.NOTHING_STAGED,
+    )
 
     // A summary that looks like an option must not become one.
     await put(join(workspace, 'a.txt'), 'one\ntwo\nthree\nfour\nfive\n')
-    await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['a.txt'], staged: true })
-    const tricky = await harness.call(ACTIONS.COMMIT, { sessionId: SESSION, summary: '-not-an-option', description: '--also-not' })
+    const tricky = await harness.call(ACTIONS.COMMIT, {
+      sessionId: SESSION,
+      summary: '-not-an-option',
+      description: '--also-not',
+      paths: ['a.txt'],
+    })
     eq('a leading dash is just text', tricky.body.ok, true)
     eq('and git stored it verbatim', (await git(workspace, ['log', '-1', '--pretty=%s'])).stdout.trim(), '-not-an-option')
 
-    // Untracked files are not committed by accident.
+    // Only the named paths go in. An untracked file nobody ticked stays out even
+    // though `git add -A` in the wrong place would have swept it up.
     await put(join(workspace, 'loose.txt'), 'never ticked\n')
     await put(join(workspace, 'a.txt'), 'one\ntwo\nthree\nfour\nfive\nsix\n')
-    await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['a.txt'], staged: true })
-    await harness.call(ACTIONS.COMMIT, { sessionId: SESSION, summary: 'partial' })
+    await harness.call(ACTIONS.COMMIT, { sessionId: SESSION, summary: 'partial', paths: ['a.txt'] })
     ok('the untracked file was NOT committed', (await realStatus(workspace)).some((record) => record === '?? loose.txt'))
+
+    // A ticked path with nothing to commit is refused rather than turned into an
+    // empty commit. (`loose.txt` is real content and gets committed; re-ticking a
+    // path that already matches HEAD is what must be refused.)
+    await harness.call(ACTIONS.COMMIT, { sessionId: SESSION, summary: 'sweep loose', paths: ['loose.txt'] })
+    await put(join(workspace, 'a.txt'), 'one\ntwo\nthree\nfour\nfive\nsix\nseven\n')
+    await harness.call(ACTIONS.COMMIT, { sessionId: SESSION, summary: 'seven', paths: ['a.txt'] })
+    await harness.expectFailure(
+      ACTIONS.COMMIT,
+      { sessionId: SESSION, summary: 'nothing changed', paths: ['a.txt'] },
+      ERROR_CODES.NOTHING_STAGED,
+    )
+
+    // --- the invariant the whole redesign exists for -------------------------
+    //
+    // A terminal stages one file. The panel then commits a *different* one. The
+    // terminal's staged change must still be staged afterwards: the panel builds
+    // its commit in a temporary index and never reads or rewrites the real one.
+    await put(join(workspace, 'b.txt'), 'terminal stage\n')
+    await git(workspace, ['add', 'b.txt'])
+    await put(join(workspace, 'a.txt'), 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n')
+    const second = await harness.call(ACTIONS.COMMIT, { sessionId: SESSION, summary: 'only a', paths: ['a.txt'] })
+    eq('the second commit is ok', second.body.ok, true)
+    const after = await realStatus(workspace)
+    ok('the terminal’s staged file is still staged', after.some((record) => record === 'A  b.txt'), after)
+    ok('and the panel’s file is no longer pending', !after.some((record) => record.endsWith(' a.txt')), after)
+    eq('the commit really only carried a.txt', (await git(workspace, ['show', '--name-only', '--pretty=format:', 'HEAD'])).stdout.trim(), 'a.txt')
+
+    // A partly staged file commits what is on disk, exactly as Desktop does.
+    await put(join(workspace, 'b.txt'), 'terminal stage\nplus more\n')
+    await harness.call(ACTIONS.COMMIT, { sessionId: SESSION, summary: 'whole file', paths: ['b.txt'] })
+    eq(
+      'the working-tree content is what got committed',
+      (await git(workspace, ['show', 'HEAD:b.txt'])).stdout.replace(/\r\n/g, '\n'),
+      'terminal stage\nplus more\n',
+    )
   }
 
   // ----------------------------------------------------------------- S6: diff
@@ -519,7 +565,6 @@ async function main() {
     const harness = createHarness({ workspacePath: workspace, stateDir })
 
     await put(join(workspace, 'a.txt'), 'one\nTWO\nthree\nfour\n')
-    await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['a.txt'], staged: true })
     await put(join(workspace, 'a.txt'), 'one\nTWO\nthree\nfour\nSEVEN\n')
 
     const before = await harness.call(ACTIONS.STATUS, { sessionId: SESSION })
@@ -584,12 +629,12 @@ async function main() {
     ok('the content survived as a new-file diff', detail.body.text.includes('+brand new'), detail.body.text)
     ok('the diff says the file is new', detail.body.text.includes('new file mode'), detail.body.text)
 
-    // A newly-added (staged) file is the same story: it must not be left behind.
-    await put(join(workspace, 'staged new.txt'), 'staged then discarded\n')
-    await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['staged new.txt'], staged: true })
-    const second = await harness.call(ACTIONS.DISCARD, { sessionId: SESSION, paths: ['staged new.txt'], hardDelete: false })
-    eq('a staged new file discards too', second.body.ok, true)
-    eq('and is removed from disk as well', await readFile(join(workspace, 'staged new.txt'), 'utf8').then(() => false, () => true), true)
+    // An added file is the same story: it must not be left behind.
+    await put(join(workspace, 'added new.txt'), 'added then discarded\n')
+    await git(workspace, ['add', 'added new.txt'])
+    const second = await harness.call(ACTIONS.DISCARD, { sessionId: SESSION, paths: ['added new.txt'], hardDelete: false })
+    eq('an added file discards too', second.body.ok, true)
+    eq('and is removed from disk as well', await readFile(join(workspace, 'added new.txt'), 'utf8').then(() => false, () => true), true)
     eq('with a clean index afterwards', (await realStatus(workspace)).length, 0)
   }
 
@@ -739,13 +784,27 @@ async function main() {
     // Discard-all must not quietly skip the conflict either.
     await harness.expectFailure(ACTIONS.DISCARD, { sessionId: SESSION, paths: null, hardDelete: false }, ERROR_CODES.CONFLICT)
 
+    // The host refuses it itself, by asking git which paths are unmerged. It has
+    // to: the commit is built in a temporary index seeded from HEAD, which has no
+    // conflict entries, so `git add` there would happily stage the working-tree
+    // file complete with its `<<<<<<<` markers.
     const commitRefusal = await harness.expectFailure(
       ACTIONS.COMMIT,
-      { sessionId: SESSION, summary: 'should not commit' },
+      { sessionId: SESSION, summary: 'should not commit', paths: ['shared.txt'] },
       ERROR_CODES.CONFLICT,
     )
     ok('committing an unresolved conflict is refused too', /冲突/.test(commitRefusal.body.error.message), commitRefusal.body.error.message)
+    ok('and the refusal names the path', commitRefusal.body.error.message.includes('shared.txt'), commitRefusal.body.error.message)
     ok('and nothing was committed onto main by accident', (await git(workspace, ['log', '-1', '--pretty=%s'])).stdout.includes('main side'))
+
+    // Excluding the conflict is not a loophole either: with nothing else ticked
+    // there is nothing to commit, and the refusal says so rather than making an
+    // empty commit.
+    await harness.expectFailure(
+      ACTIONS.COMMIT,
+      { sessionId: SESSION, summary: 'nothing ticked', paths: [] },
+      ERROR_CODES.NOTHING_STAGED,
+    )
   }
 
   // ------------------------------------------------------------- S13: binding
@@ -865,8 +924,7 @@ async function main() {
 
     // A local commit makes the button a push again.
     await put(join(workspace, 'a.txt'), 'one\ntwo\n')
-    await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['a.txt'], staged: true })
-    const commitAndPush = await harness.call(ACTIONS.COMMIT_PUSH, { sessionId: SESSION, summary: 'second' })
+    const commitAndPush = await harness.call(ACTIONS.COMMIT_PUSH, { sessionId: SESSION, summary: 'second', paths: ['a.txt'] })
     eq('commit-and-push is ok', commitAndPush.body.ok, true)
     eq('the commit half succeeded', commitAndPush.body.commit.summary, 'second')
     eq('the push half succeeded', commitAndPush.body.push.ok, true)
@@ -887,8 +945,7 @@ async function main() {
     await git(other, ['push', '-q', 'origin', 'main'])
 
     await put(join(workspace, 'a.txt'), 'locally different\n')
-    await harness.call(ACTIONS.STAGE, { sessionId: SESSION, paths: ['a.txt'], staged: true })
-    const rejected = await harness.call(ACTIONS.COMMIT_PUSH, { sessionId: SESSION, summary: 'will not push' })
+    const rejected = await harness.call(ACTIONS.COMMIT_PUSH, { sessionId: SESSION, summary: 'will not push', paths: ['a.txt'] })
     eq('commit-and-push still reports ok', rejected.body.ok, true)
     eq('because the commit really did happen', rejected.body.commit.summary, 'will not push')
     eq('and only the push failed', rejected.body.push.ok, false)
@@ -975,8 +1032,13 @@ async function main() {
     const arrayBody = await harness.route.fetch(new Request(`http://dsh.internal${RPC_ROUTE}`, { method: 'POST', body: '[]' }))
     eq('an array body is refused', arrayBody.status, 400)
 
-    await harness.expectFailure(ACTIONS.STAGE, { sessionId: SESSION, paths: [], staged: true }, ERROR_CODES.BAD_REQUEST)
-    await harness.expectFailure(ACTIONS.STAGE, { sessionId: SESSION, paths: 'a.txt', staged: true }, ERROR_CODES.BAD_REQUEST)
+    // `paths` is required by the commit handlers, and a wrong type is a bad
+    // request rather than a commit of everything.
+    await harness.expectFailure(
+      ACTIONS.COMMIT,
+      { sessionId: SESSION, summary: 'x', paths: 'a.txt' },
+      ERROR_CODES.BAD_REQUEST,
+    )
 
     const response = await harness.route.fetch(
       new Request(`http://dsh.internal${RPC_ROUTE}`, { method: 'POST', body: JSON.stringify({ action: ACTIONS.PREFS }) }),
@@ -1148,22 +1210,26 @@ async function main() {
     eq('the untracked file is recreated', await readFile(join(workspace, 'fresh untracked.txt'), 'utf8'), 'brand new content\n')
     eq('and the other edit too', await readFile(join(workspace, 'docs', 'guide.md'), 'utf8'), '# guide\n## edited\n')
 
-    // What came back is ticked, which in this panel means staged. Read out of the
-    // status payload the action itself returned — that is what the panel draws
-    // its ticks from, so a check here is the same claim a user makes by looking.
-    const ticked = (restored.body.files ?? []).filter((file) => file.staged === true).map((file) => file.path).sort()
-    eq('everything restored comes back ticked', ticked, ['a.txt', 'docs/guide.md', 'fresh untracked.txt'])
-    eq('and the payload agrees with the tick count', restored.body.counts?.staged, 3)
-    eq('the host names what it staged', (restored.body.restored.staged ?? []).slice().sort(), ['a.txt', 'docs/guide.md', 'fresh untracked.txt'])
+    // What came back is in the list as an ordinary change, and a tick is now the
+    // panel's own choice rather than a fact about the index — so the claim is that
+    // the three paths are *listed* (and therefore ticked by the panel's default),
+    // not that git staged them. The index is deliberately untouched now, which is
+    // what keeps a terminal's own staging out of the panel's way.
+    const restoredPaths = (restored.body.files ?? []).map((file) => file.path).sort()
+    eq('everything restored is back in the change list', restoredPaths, ['a.txt', 'docs/guide.md', 'fresh untracked.txt'])
+    eq('and nothing was staged on the user’s behalf', (restored.body.restored.staged ?? []), [])
 
-    // The tick is the real index, so git has to agree with the panel, not just
-    // the payload: this is the claim a user checks by typing `git status`.
-    // Porcelain v2's `1 XY …` records put the *index* status first, so a `'.'`
-    // there is "not staged" whatever the worktree column says — counting `A.`
-    // only would miss the two restored files that are staged *modifications*.
+    // Git has to agree that the replay produced work — as *unstaged* changes. A
+    // `'.'` in porcelain v2's worktree column (the second character) would mean
+    // the file matches the index, i.e. nothing came back. `??` records are
+    // untracked files and carry no `XY` pair at all, so they are counted too.
     const porcelain = await git(workspace, ['status', '--porcelain=v2', '-z'])
+    const changed = porcelain.stdout
+      .split('\0')
+      .filter((record) => (record.startsWith('1 ') && record[3] !== '.') || record.startsWith('? '))
+    eq('git agrees the three paths changed', changed.length, 3)
     const stagedRecords = porcelain.stdout.split('\0').filter((record) => record.startsWith('1 ') && record[2] !== '.')
-    eq('git agrees that they are staged', stagedRecords.length, 3)
+    eq('and the index was left alone', stagedRecords.length, 0)
 
     // The entry is gone once it has been put back. Keeping it would leave a row
     // that can only ever be greyed out — replaying it again would apply the same

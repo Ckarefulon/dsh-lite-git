@@ -359,7 +359,10 @@ describe('apply: the slot seats', () => {
   it('waits for both seats instead of registering into the void', () => {
     const env = install()
     const waited = [...new Set(env.state.injections.map((entry) => entry.name))].sort()
-    assert.deepEqual(waited, ['sidebar.right.pane.tab', 'sidebar.right.pane.tab.title'])
+    // The right column's two seats, plus the conversation header's utilities —
+    // a `list` slot declared by ui-conversation, so the icon has to wait for it
+    // the same way it waits for the tab column.
+    assert.deepEqual(waited, ['conversation.session.header.utilities', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title'])
     assert.equal(env.state.slots.length, 0, 'nothing registers before the declaration exists')
   })
 
@@ -393,14 +396,22 @@ describe('apply: the slot seats', () => {
     const env = install()
     const typeIds = new Set(env.state.types.map((type) => type.id))
     for (const entry of fireAll(env)) {
+      // The header icon lives in a `list` slot, so its key is an id of our own
+      // rather than one of the tab types — every *tab* seat must still name a
+      // registered type.
+      if (entry.definition.name === 'conversation.session.header.utilities') {
+        assert.equal(entry.definition.id, env.exports.HEADER_ICON_ID ?? 'dsh-lite-git/header')
+        continue
+      }
       assert.ok(typeIds.has(entry.definition.key), `${entry.definition.key} is not a registered type id`)
     }
   })
 
   it('every registration has a label, so a leak is attributable', () => {
     const env = install()
-    // One for the dictionaries, three for the tab types, six for the seats.
-    assert.equal(env.state.effects.length, 10)
+    // One for the dictionaries, three for the tab types, six for the seats, and
+    // one for the conversation header's icon.
+    assert.equal(env.state.effects.length, 11)
     for (const entry of env.state.effects) {
       assert.equal(typeof entry.label, 'string')
       assert.ok(entry.label.startsWith('dsh-lite-git: '), entry.label)
@@ -547,16 +558,20 @@ describe('pure helpers', () => {
     assert.equal(internals.restoreReasonText(t, undefined), 'trash.restoreNoDiff')
   })
 
-  it('count only staged, non-conflicted files as committable', () => {
+  it('count every non-conflicted change as committable unless it was unticked', () => {
+    // A tick is a choice, not the index: everything in the list is committed
+    // unless the user took it out, so nothing here reads `staged`.
     const state = {
       counts: { conflicted: 0 },
       files: [
-        { staged: true, conflicted: false },
-        { staged: true, conflicted: true },
-        { staged: false, conflicted: false },
+        { path: 'a.txt', staged: false, conflicted: false },
+        { path: 'b.txt', staged: true, conflicted: true },
+        { path: 'c.txt', staged: false, conflicted: false },
       ],
     }
-    assert.equal(internals.stagedCount(state), 1)
+    assert.equal(internals.stagedCount(state), 2)
+    assert.equal(internals.stagedCount(state, new Set(['c.txt'])), 1)
+    assert.equal(internals.stagedCount(state, new Set(['a.txt', 'c.txt'])), 0)
     assert.equal(internals.stagedCount(null), 0)
     assert.equal(internals.stagedCount({}), 0)
     assert.equal(internals.hasConflict(state), false)
@@ -564,34 +579,41 @@ describe('pure helpers', () => {
   })
 
   it('decide what the select-all box shows', () => {
-    const file = (path, staged, conflicted = false) => ({ path, staged, conflicted })
+    const file = (path, conflicted = false) => ({ path, staged: false, conflicted })
     const state = (files) => ({ counts: {}, files })
 
     // Nothing selectable at all: the box cannot do anything, so it is disabled.
     assert.equal(internals.selectionState(state([])), 'empty')
     assert.equal(internals.selectionState(null), 'empty')
-    assert.equal(internals.selectionState(state([file('c.txt', false, true)])), 'empty')
+    assert.equal(internals.selectionState(state([file('c.txt', true)])), 'empty')
 
-    assert.equal(internals.selectionState(state([file('a.txt', false)])), 'none')
-    assert.equal(internals.selectionState(state([file('a.txt', true)])), 'all')
+    // Everything is ticked by default, so a fresh list reads as "all" — that is
+    // exactly the GitHub Desktop opening state and the reason the old
+    // "index is empty so tick everything" rule is gone.
+    assert.equal(internals.selectionState(state([file('a.txt')])), 'all')
+    assert.equal(internals.selectionState(state([file('a.txt')]), new Set(['a.txt'])), 'none')
     // The mixed state is the one a two-state box could not express without
     // either lying about the selection or throwing it away.
-    assert.equal(internals.selectionState(state([file('a.txt', true), file('b.txt', false)])), 'some')
+    assert.equal(internals.selectionState(state([file('a.txt'), file('b.txt')]), new Set(['b.txt'])), 'some')
 
     // A conflicted file is not selectable, so it must not count in either
     // direction: one ticked file beside one conflict is "all", not "some",
-    // because ticking the conflict is the one thing the button must never do.
-    assert.equal(internals.selectionState(state([file('a.txt', true), file('c.txt', false, true)])), 'all')
-    assert.equal(internals.selectionState(state([file('c.txt', true, true)])), 'empty')
+    // because committing the conflict is the one thing the button must never do.
+    assert.equal(internals.selectionState(state([file('a.txt'), file('c.txt', true)])), 'all')
+    assert.equal(internals.selectionState(state([file('c.txt', true)])), 'empty')
 
-    assert.deepEqual(internals.selectablePaths(state([file('a.txt', false), file('c.txt', false, true)])), ['a.txt'])
+    assert.deepEqual(internals.selectablePaths(state([file('a.txt'), file('c.txt', true)])), ['a.txt'])
   })
 
   it('decide the commit buttons, and say why not', () => {
-    const ready = { counts: { conflicted: 0 }, files: [{ staged: true, conflicted: false }] }
+    const ready = { counts: { conflicted: 0 }, files: [{ path: 'a.txt', staged: false, conflicted: false }] }
     assert.deepEqual(internals.commitReadiness(ready, 'summary', null), { canCommit: true, reasonKey: null })
     assert.deepEqual(internals.commitReadiness(ready, '   ', null), { canCommit: false, reasonKey: 'commit.needsSummary' })
-    assert.deepEqual(internals.commitReadiness({ counts: {}, files: [{ staged: false }] }, 'summary', null), {
+    assert.deepEqual(internals.commitReadiness(ready, 'summary', null, new Set(['a.txt'])), {
+      canCommit: false,
+      reasonKey: 'commit.needsStaged',
+    })
+    assert.deepEqual(internals.commitReadiness({ counts: {}, files: [] }, 'summary', null), {
       canCommit: false,
       reasonKey: 'commit.needsStaged',
     })
@@ -658,7 +680,10 @@ describe('pure helpers', () => {
       ].join('\n'),
     )
     const kinds = rows.map((row) => row.kind)
-    assert.deepEqual(kinds, ['file', 'meta', 'meta', 'meta', 'hunk', 'ctx', 'del', 'add', 'note'])
+    // The `diff --git`/`index`/`---`/`+++` block is one `file` row now: those
+    // four lines are how git encodes a file, not what changed in it. The `\ No
+    // newline` note is folded onto the line above it, so it is not a row.
+    assert.deepEqual(kinds, ['file', 'hunk', 'ctx', 'del', 'add'])
     const add = rows.find((row) => row.kind === 'add')
     const del = rows.find((row) => row.kind === 'del')
     assert.equal(add.text, 'new')
@@ -667,8 +692,82 @@ describe('pure helpers', () => {
     assert.equal(del.text, 'old')
     assert.equal(del.oldLine, 2)
     assert.equal(rows.find((row) => row.kind === 'ctx').oldLine, 1)
+    // The mechanical lines are kept on the header rather than thrown away: this
+    // tab is the only reading of a discarded change there is.
+    assert.equal(rows[0].path, 'a.txt')
+    assert.ok(rows[0].raw.includes('index 111..222 100644'), rows[0].raw.join('|'))
+    assert.equal(rows.find((row) => row.kind === 'add').noNewline, 'No newline at end of file')
     assert.equal(internals.diffRows('')[0], undefined)
     assert.equal(internals.diffRows(null).length, 0)
+  })
+
+  it('name what happened to each file in the diff, from the lines it folds away', () => {
+    const header = (lines) => internals.diffRows(lines.join('\n'))[0]
+
+    assert.equal(header(['diff --git a/x.txt b/x.txt', 'new file mode 100644', '--- /dev/null', '+++ b/x.txt', '@@ -0,0 +1 @@', '+hi']).badge, 'added')
+    assert.equal(header(['diff --git a/gone.txt b/gone.txt', 'deleted file mode 100644', '--- a/gone.txt', '+++ /dev/null', '-bye']).badge, 'deleted')
+    const renamed = header([
+      'diff --git a/old name.txt b/new name.txt',
+      'similarity index 100%',
+      'rename from old name.txt',
+      'rename to new name.txt',
+    ])
+    assert.equal(renamed.badge, 'renamed')
+    assert.equal(renamed.path, 'new name.txt', 'the rename target, from git’s own statement of it')
+    assert.equal(renamed.origPath, 'old name.txt')
+    assert.equal(header(['diff --git a/b.bin b/b.bin', 'index 1..2 100644', 'Binary files a/b.bin and b/b.bin differ']).badge, 'binary')
+    assert.equal(header(['diff --git a/m.sh b/m.sh', 'old mode 100644', 'new mode 100755']).badge, 'mode')
+    assert.equal(header(['diff --git a/p.txt b/p.txt', 'index 1..2 100644', '--- a/p.txt', '+++ b/p.txt', '@@ -1 +1 @@', '-a', '+b']).badge, undefined)
+  })
+
+  it('keep a hunk header’s enclosing section, and drop the coordinate', () => {
+    const rows = internals.diffRows(['diff --git a/a.js b/a.js', '--- a/a.js', '+++ b/a.js', '@@ -12,7 +12,9 @@ function render() {', ' line'].join('\n'))
+    const hunk = rows.find((row) => row.kind === 'hunk')
+    assert.equal(hunk.section, 'function render() {')
+    assert.equal(hunk.text, '@@ -12,7 +12,9 @@ function render() {', 'the coordinate is still on the row, for the tooltip')
+    // With nothing after the second `@@`, there is no section to show — and
+    // forcing an empty string would make the renderer draw an empty row.
+    const bare = internals.diffRows(['diff --git a/b.js b/b.js', '--- a/b.js', '+++ b/b.js', '@@ -1 +1 @@', '-a', '+b'].join('\n'))
+    assert.equal(bare.find((row) => row.kind === 'hunk').section, undefined)
+  })
+
+  it('draw a diff as code with a sign column, not as text with + and − glued on', () => {
+    const keyed = (key) => key
+    const rows = internals.diffRows(
+      ['diff --git a/a.txt b/a.txt', 'new file mode 100644', '--- /dev/null', '+++ b/a.txt', '@@ -0,0 +1,2 @@', '+let x = a + b', '+second', ''].join('\n'),
+    )
+    const totals = new Map([[0, { added: 2, deleted: 0 }]])
+    const tree = internals.renderDiffRows(rows, totals, null, () => {}, keyed)
+
+    // The header card is one row, and it carries the file and what happened. It
+    // is a component, so this stub hands back the element and the card itself is
+    // asserted where it is rendered — as a plain function of its props.
+    const headerElement = tree.find((node) => node.type === internals.FileHeader)
+    assert.ok(headerElement !== undefined, 'the first row is the file header')
+    const head = internals.FileHeader({ ...headerElement.props, t: keyed })
+    assert.equal(head.props['data-lite-git-filehead'], 'a.txt')
+    assert.ok(textOf(head).includes('diff.headerAdd'), textOf(head))
+    assert.ok(textOf(head).includes('+2'), `the card counts its own lines: ${textOf(head)}`)
+
+    // No raw `diff --git`, `index` or `+++` line anywhere on screen, and the hunk
+    // coordinate is not printed as if it were code either.
+    const codes = tree
+      .filter((node) => node.type === 'div')
+      .map((node) => textOf(node))
+      .join('\n')
+    assert.ok(!codes.includes('diff --git'), codes)
+    assert.ok(!codes.includes('+++'), codes)
+    assert.ok(!codes.includes('new file mode'), codes)
+
+    // Every code cell is exactly the line's text: the sign is in its own column,
+    // so `a + b` does not turn into `+a + b`.
+    const sign = (row) => nodesOf(row).find((node) => node.props?.className === 'lite-git-sign')
+    const code = (row) => nodesOf(row).find((node) => node.props?.className === 'lite-git-code')
+    const adds = tree.filter((node) => node.props?.className === 'lite-git-diffRow lite-git-r-add')
+    assert.equal(adds.length, 2)
+    assert.equal(sign(adds[0]).children[0].text, '+')
+    assert.equal(code(adds[0]).children[0].text, 'let x = a + b')
+    assert.equal(code(adds[1]).children[0].text, 'second')
   })
 })
 
@@ -679,32 +778,39 @@ describe('the components without hooks', () => {
 
   const plainT = (key, params) => interpolateLike(key, params)
 
-  it('draw a tick from the index, not from local state', () => {
+  it('draw the tick from the panel’s own choice, never from the index', () => {
     const calls = []
-    const row = (file) =>
+    const row = (file, ticked) =>
       ChangeRow({
         file,
+        ticked,
         t: plainT,
         onToggle: (target) => calls.push(['toggle', target.path]),
         onDiscard: (path) => calls.push(['discard', path]),
         onOpen: (path) => calls.push(['open', path]),
       })
 
-    const staged = withAttr(row({ path: 'a.txt', kind: 'modified', staged: true, partial: false, added: 2, deleted: 1 }), 'data-lite-git-tick')
-    assert.equal(staged.props['aria-checked'], 'true')
-    assert.ok(staged.props.className.includes('lite-git-tick-on'), staged.props.className)
+    // `staged` is deliberately inverted here: it describes the index, which the
+    // box no longer reads. If the row ever went back to drawing from it, these
+    // two assertions would swap and fail.
+    const on = withAttr(row({ path: 'a.txt', kind: 'modified', staged: false, partial: true }, true), 'data-lite-git-tick')
+    assert.equal(on.props['aria-checked'], 'true')
+    assert.ok(on.props.className.includes('lite-git-tick-on'), on.props.className)
 
-    const unstaged = withAttr(row({ path: 'a.txt', kind: 'modified', staged: false, partial: false }), 'data-lite-git-tick')
-    assert.equal(unstaged.props['aria-checked'], 'false')
-    assert.ok(!unstaged.props.className.includes('lite-git-tick-on'))
+    const off = withAttr(row({ path: 'a.txt', kind: 'modified', staged: true, partial: false }, false), 'data-lite-git-tick')
+    assert.equal(off.props['aria-checked'], 'false')
+    assert.ok(!off.props.className.includes('lite-git-tick-on'))
 
-    const partial = withAttr(row({ path: 'a.txt', kind: 'modified', staged: true, partial: true }), 'data-lite-git-tick')
-    assert.ok(partial.props.className.includes('lite-git-tick-partial'), 'a half-staged file reads as indeterminate')
+    // There is no third state any more. A file whose index and worktree differ is
+    // drawn exactly like any other: two states, and the reason the "nobody ticked
+    // this but it looks half-ticked" report cannot come back.
+    const split = withAttr(row({ path: 'a.txt', kind: 'modified', staged: true, partial: true }, true), 'data-lite-git-tick')
+    assert.ok(!split.props.className.includes('lite-git-tick-partial'), split.props.className)
 
-    staged.props.onClick({ stopPropagation: () => {} })
+    on.props.onClick({ stopPropagation: () => {} })
     assert.deepEqual(calls, [['toggle', 'a.txt']])
 
-    unstaged.props.onClick({ stopPropagation: () => {} })
+    off.props.onClick({ stopPropagation: () => {} })
     // The click stops at the tick: double-click on the row opens the diff, and a
     // tick must not also fire that.
     assert.deepEqual(calls.at(-1), ['toggle', 'a.txt'])
@@ -734,7 +840,13 @@ describe('the components without hooks', () => {
       path.children.map((child) => child?.props?.className),
       ['lite-git-dir', 'lite-git-sep', 'lite-git-name'],
     )
-    assert.equal(path.children[0].children[0].text, 'src/deep')
+    // The directory's text sits one node deeper than the box that truncates it:
+    // the box is `direction:rtl` so the ellipsis lands on the left, and the text
+    // inside is isolated and left-to-right so a leading dot stays a leading dot
+    // (`.test/abc`, never `test/abc.`).
+    const dirText = path.children[0].children[0]
+    assert.equal(dirText.props.className, 'lite-git-dirText')
+    assert.equal(dirText.children[0].text, 'src/deep')
     assert.equal(path.children[1].children[0].text, '/')
     assert.equal(path.children[2].children[0].text, 'a.txt')
 
@@ -919,6 +1031,29 @@ describe('the DOM hooks a fixture would need', () => {
 
     // A hairline, like the shell's own headers, in the token it uses for them.
     assert.ok(/border-bottom:\.5px solid var\(--dsw-alias-border-l3/.test(body), 'the rule must be the shell\'s .5px border-l3 hairline')
+  })
+
+  it('colour added and removed rows with the theme’s diff tokens, not a hover grey', () => {
+    // The bug this pins: the add/del rows used `--dsw-alias-interactive-bg-hover`
+    // with a green/red `rgba` *fallback*. A theme defines the hover token, so the
+    // fallback never applied and every diff came out grey — plausible-looking CSS
+    // that was wrong in every real theme. `--dsw-alias-code-diff-*` is the shell's
+    // own pair for exactly this.
+    const env = install()
+    const css = env.state.styles[0].textContent
+    const rule = (selector) => {
+      const match = new RegExp(`${selector.replace('.', '\\.')}\\{([^}]*)\\}`).exec(css)
+      assert.ok(match !== null, `no rule for ${selector}`)
+      return match[1]
+    }
+    assert.ok(/background:var\(--dsw-alias-code-diff-added/.test(rule('.lite-git-r-add')), rule('.lite-git-r-add'))
+    assert.ok(/background:var\(--dsw-alias-code-diff-deleted/.test(rule('.lite-git-r-del')), rule('.lite-git-r-del'))
+    // The sign is the theme's marker colour, so a `+` is the green the shell uses.
+    assert.ok(css.includes('.lite-git-r-add .lite-git-sign{color:var(--dsw-alias-file-diff-added-marker'), 'the add sign uses the marker token')
+    assert.ok(css.includes('.lite-git-r-del .lite-git-sign{color:var(--dsw-alias-file-diff-deleted-marker'), 'the del sign uses the marker token')
+    // The gutter is tinted too — "which line" is separated from "what the line says".
+    assert.ok(css.includes('.lite-git-r-add .lite-git-gutter{background:var(--dsw-alias-file-diff-added-gutter'), 'the add gutter is tinted')
+    assert.ok(css.includes('.lite-git-r-del .lite-git-gutter{background:var(--dsw-alias-file-diff-deleted-gutter'), 'the del gutter is tinted')
   })
 
   it('never writes a literal colour, so the theme decides', () => {
