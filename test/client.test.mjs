@@ -887,50 +887,87 @@ describe('pure helpers', () => {
     assert.deepEqual(internals.diffGaps(twoFiles), [], 'the file boundary is not a gap')
   })
 
-  it('draw a pressable strip for a gap, and the lines once it is open', () => {
+  it('draw a gap as one row with a button at each end', () => {
     const rows = internals.diffRows(
       ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-a', '+A', '@@ -20 +20 @@', '-t', '+T', ''].join('\n'),
     )
     const pressed = []
-    const closed = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key, {
-      gapOpen: () => false,
+    const tree = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key, {
+      gapState: () => undefined,
       gapLines: () => undefined,
-      onGap: (gap) => pressed.push([gap.from, gap.to]),
+      onGap: (gap) => pressed.push([gap.from, gap.to, gap.edge]),
     })
-    const strip = closed.find((node) => node.props?.['data-lite-git-gap'] !== undefined)
+    const strip = tree.find((node) => node.props?.['data-lite-git-gap'] !== undefined)
     assert.ok(strip !== undefined, 'the folded gap has a strip')
     assert.equal(strip.props['data-lite-git-gap'], '2-19', 'old lines 2..19 were left out (18 of them)')
-    assert.equal(strip.props['aria-expanded'], 'false')
-    // Pressing it asks for exactly that range.
-    strip.props.onClick()
-    assert.deepEqual(pressed, [[2, 19]])
+    // Both edges are counted separately, and both start at nothing.
+    assert.equal(strip.props['data-lite-git-gap-down'], '0')
+    assert.equal(strip.props['data-lite-git-gap-up'], '0')
 
-    // Open: the lines are drawn, and each carries the same number on both sides.
-    const open = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key, {
-      gapOpen: () => true,
-      gapLines: () => ['x', 'y'],
+    // One row, two buttons at its left end, and the count where the code goes.
+    assert.equal(strip.children.length, 2)
+    const buttonBox = strip.children[0]
+    const buttons = buttonBox.children
+    assert.equal(buttons.length, 2, 'two buttons, side by side')
+    assert.deepEqual(buttons.map((button) => button.props['data-lite-git-gapbtn']), ['down', 'up'])
+    assert.equal(buttons[0].props.disabled, false)
+    assert.equal(buttons[1].props.disabled, false)
+    // The text column says how many lines are still hidden.
+    assert.equal(textOf(strip.children[1]), 'diff.gapHidden')
+
+    // The two buttons ask for two different edges of the same gap.
+    buttons[0].props.onClick()
+    buttons[1].props.onClick()
+    assert.deepEqual(pressed, [
+      [2, 19, 'down'],
+      [2, 19, 'up'],
+    ])
+  })
+
+  it('grow a gap in from both ends, 20 lines at a time', () => {
+    const rows = internals.diffRows(
+      ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-a', '+A', '@@ -60 +60 @@', '-t', '+T', ''].join('\n'),
+    )
+    // gap is old lines 2..59: 58 of them. Give it 20 down and 20 up.
+    const tree = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key, {
+      gapState: () => ({ down: 20, up: 20 }),
+      gapLines: () => ({ 2: 'l2', 3: 'l3', 58: 'l58', 59: 'l59' }),
       onGap: () => {},
     })
-    const openedStrip = open.find((node) => node.props?.['data-lite-git-gap'] !== undefined)
-    assert.equal(openedStrip.props['aria-expanded'], 'true')
-    // The gap's rows are ordinary context rows sitting right after the strip.
-    const stripAt = open.indexOf(openedStrip)
-    const after = open.slice(stripAt + 1, stripAt + 3)
-    assert.deepEqual(
-      after.map((node) => node.props?.className),
-      ['lite-git-diffRow lite-git-r-ctx', 'lite-git-diffRow lite-git-r-ctx'],
-      'two context rows follow the open strip',
+    const strip = tree.find((node) => node.props?.['data-lite-git-gap'] !== undefined)
+    assert.equal(strip.props['data-lite-git-gap-down'], '20')
+    assert.equal(strip.props['data-lite-git-gap-up'], '20')
+    // 58 hidden, 40 shown: the text says how many are left.
+    assert.equal(textOf(strip.children[1]), 'diff.gapRemaining')
+
+    // 40 context rows come after the strip, top edge first then bottom edge.
+    const stripAt = tree.indexOf(strip)
+    const after = tree.slice(stripAt + 1, stripAt + 41)
+    assert.equal(after.length, 40)
+    assert.ok(after.every((row) => row.props?.className === 'lite-git-diffRow lite-git-r-ctx'))
+    // The first is the topmost pulled-down line, the last is the bottom-most
+    // pulled-up one, and they meet in the middle.
+    const gutterOf = (row) => row.children[0].children[0]
+    assert.equal(textOf(gutterOf(after[0])), '2')
+    assert.equal(textOf(gutterOf(after[19])), '21')
+    assert.equal(textOf(gutterOf(after[20])), '40')
+    assert.equal(textOf(gutterOf(after[39])), '59')
+  })
+
+  it('disable a gap button once its edge has reached the other', () => {
+    const rows = internals.diffRows(
+      ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-a', '+A', '@@ -4 +4 @@', '-t', '+T', ''].join('\n'),
     )
-    // Each one numbers the same line on both sides: the run is identical there.
-    for (const [offset, row] of after.entries()) {
-      const cells = row.children
-      assert.deepEqual(
-        cells[0].children.map((cell) => textOf(cell)),
-        [String(2 + offset), String(2 + offset), ''],
-        `line ${2 + offset} is numbered the same in both gutters`,
-      )
-      assert.equal(textOf(cells[1]), offset === 0 ? 'x' : 'y')
-    }
+    // A three-line gap, fully pulled in from below: the down button has nothing
+    // left to give, and the up button has nothing either.
+    const tree = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key, {
+      gapState: () => ({ down: 0, up: 3 }),
+      gapLines: () => ({ 2: 'x', 3: 'y', 4: 'z' }),
+      onGap: () => {},
+    })
+    const strip = tree.find((node) => node.props?.['data-lite-git-gap'] !== undefined)
+    assert.equal(strip.children[0].children[0].props.disabled, true, 'down has nothing left')
+    assert.equal(strip.children[0].children[1].props.disabled, true, 'and neither does up')
   })
 
   it('draw a diff as code with a sign column, not as text with + and − glued on', () => {
@@ -1274,21 +1311,31 @@ describe('the DOM hooks a fixture would need', () => {
       assert.ok(match !== null, `no rule for ${selector}`)
       return match[1]
     }
-    assert.ok(/background:var\(--dsw-alias-code-diff-added/.test(rule('.lite-git-r-add')), rule('.lite-git-r-add'))
-    assert.ok(/background:var\(--dsw-alias-code-diff-deleted/.test(rule('.lite-git-r-del')), rule('.lite-git-r-del'))
+    assert.ok(/background:var\(--dsw-alias-file-diff-added-bg/.test(rule('.lite-git-r-add')), rule('.lite-git-r-add'))
+    assert.ok(/background:var\(--dsw-alias-file-diff-deleted-bg/.test(rule('.lite-git-r-del')), rule('.lite-git-r-del'))
     // The sign is the theme's marker colour, so a `+` is the green the shell uses.
     assert.ok(css.includes('.lite-git-r-add .lite-git-sign{color:var(--dsw-alias-file-diff-added-marker'), 'the add sign uses the marker token')
     assert.ok(css.includes('.lite-git-r-del .lite-git-sign{color:var(--dsw-alias-file-diff-deleted-marker'), 'the del sign uses the marker token')
-    // The gutter is tinted too — "which line" is separated from "what the line says".
-    assert.ok(css.includes('.lite-git-r-add .lite-git-gutter{background:var(--dsw-alias-file-diff-added-gutter'), 'the add gutter is tinted')
-    assert.ok(css.includes('.lite-git-r-del .lite-git-gutter{background:var(--dsw-alias-file-diff-deleted-gutter'), 'the del gutter is tinted')
+    // One background for the whole row: the gutter is *not* tinted separately
+    // any more, because two shades for one line put a visible seam between the
+    // numbers and the code beside them.
+    assert.ok(
+      css.includes('.lite-git-r-add .lite-git-gutter,.lite-git-r-del .lite-git-gutter{background:transparent}'),
+      'the gutter shares the row\u2019s background',
+    )
   })
 
   it('never writes a literal colour, so the theme decides', () => {
     const assignments = [...bundle.matchAll(/(?:color|background|border-color)\s*:\s*([^;'}]+)/g)].map((match) => match[1].trim())
     for (const value of assignments) {
       assert.ok(
-        value.startsWith('var(--') || value.startsWith('none') || value.startsWith('inherit') || value.startsWith('transparent'),
+        value.startsWith('var(--') ||
+          // A `color-mix` over a theme token is still theme-driven: it is how the
+          // panel asks for "this colour, stronger" without naming a colour.
+          (value.startsWith('color-mix(') && value.includes('var(--')) ||
+          value.startsWith('none') ||
+          value.startsWith('inherit') ||
+          value.startsWith('transparent'),
         `a literal colour slipped in: ${value}`,
       )
     }

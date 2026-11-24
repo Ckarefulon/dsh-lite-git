@@ -506,6 +506,37 @@ is a gap at all:
   range is clamped to the file for the same reason: the diff that produced the
   request is allowed to be one refresh stale.
 
+**A gap has two edges, so it gets two buttons.** The strip is one row with the
+chevrons in the gutter's column and the count where the code goes — the row is
+the affordance, so the buttons are bare rather than filled boxes, which at this
+size would out-weigh every control around them. `▾` pulls down from the hunk
+above, `▴` pulls up from the hunk below, and each press asks for the next
+**20** lines of that edge (`GAP_STEP`, GitHub's own limit for a context request).
+
+The two edges are counted separately (`{ down, up }` per gap) rather than as one
+"open" flag, because they are two different questions and the user may press both:
+the gap can then fill in from both ends until they meet. Lines are stored by line
+number, so the top range and the bottom range cannot overwrite each other, and a
+button greys out once its own edge has reached the other.
+
+**Hiding whitespace is `git diff -w`, not a client-side filter.** The client has
+the diff text, not the two versions of the file, so it could only guess which
+lines differ by whitespace alone. The host runs the same command with `-w` and
+sends whatever comes back, so the totals and the hunk boundaries stay consistent
+with what is drawn. The toggle is an icon in the header, per tab rather than in
+`Config`: it is a way of reading one diff, not a setting for how diffs are read,
+and it is re-applied whenever the diff is re-read.
+
+**One background per row.** The gutter used to carry a tint of its own, so the
+numbers sat on a different colour from the code beside them — two shades for one
+line, and the seam is exactly where the eye lands. The row's colour covers the
+whole width now, and the changed characters are marked with a `color-mix` of the
+theme's own marker colour, strong enough to read *on* that background. That last
+detail is why the mark is a mix rather than a token: the shell has
+`--dsw-alias-file-diff-added-marker` (a colour) but no translucent variant of it,
+and the first attempt used a name that does not exist, so the fallback put a 22%
+tint on an already-tinted row and the mark was invisible.
+
 `diffGaps` resets at every `file` row. Without that, the first hunk of a second
 file reads as "starting after where the previous file ended", and the tab offers
 to expand lines that were never skipped — which is what a screenshot caught

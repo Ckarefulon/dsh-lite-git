@@ -279,7 +279,9 @@ check('the stylesheet claims the full height of the tab body', /\.lite-git-root\
 check('the stylesheet declares its own scroll areas, since a tab body has none', /\.lite-git-list\{[^}]*overflow:auto/.test(client) && /\.lite-git-diff\{[^}]*overflow:auto/.test(client))
 check(
   'the stylesheet never hard-codes a colour',
-  !/(?:^|[{;'\s])(?:color|background|border-color)\s*:\s*(?!var\(|none|inherit|transparent)/m.test(client),
+  // `color-mix(… var(--token) …)` is allowed: it is how the panel says "this
+  // theme colour, stronger" without naming a colour of its own.
+  !/(?:^|[{;'\s])(?:color|background|border-color)\s*:\s*(?!var\(|color-mix\(|none|inherit|transparent)/m.test(client),
 )
 
 // The one place the four kinds of privacy-relevant literal could drift.
