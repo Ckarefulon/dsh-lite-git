@@ -731,6 +731,104 @@ describe('pure helpers', () => {
     assert.equal(bare.find((row) => row.kind === 'hunk').section, undefined)
   })
 
+  it('pair a removed run with the added run that replaced it, position by position', () => {
+    const rows = internals.diffRows(
+      [
+        'diff --git a/a.txt b/a.txt',
+        '--- a/a.txt',
+        '+++ b/a.txt',
+        '@@ -1,3 +1,3 @@',
+        '-let total = a - b',
+        '-gone',
+        '+let total = a + b',
+        '+added',
+        ' ctx',
+        '',
+      ].join('\n'),
+    )
+    const pairs = internals.pairChangedRows(rows)
+    const del = rows.findIndex((row) => row.kind === 'del')
+    const del2 = del + 1
+    const add = del + 2
+    assert.equal(pairs.get(del), add, 'the first removed line pairs with the first added one')
+    assert.equal(pairs.get(del2), add + 1)
+    // The mapping is symmetric, so whichever side is rendered can find its twin.
+    assert.equal(pairs.get(add), del)
+    // The context line after the run is nobody's counterpart.
+    const ctx = rows.findIndex((row) => row.kind === 'ctx')
+    assert.equal(pairs.get(ctx), undefined)
+  })
+
+  it('leave the extra lines of a lopsided run unpaired', () => {
+    const rows = internals.diffRows(
+      ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1,3 @@', '-one', '+one', '+two', '+three', ''].join('\n'),
+    )
+    const pairs = internals.pairChangedRows(rows)
+    const del = rows.findIndex((row) => row.kind === 'del')
+    assert.equal(pairs.get(del), del + 1, 'the single removed line pairs with the first added one')
+    // two and three have no counterpart, so they keep their whole-row colour only.
+    assert.equal(pairs.get(del + 2), undefined)
+    assert.equal(pairs.get(del + 3), undefined)
+  })
+
+  it('find the characters that changed, not the whole line', () => {
+    const spans = internals.changedSpans('let total = a - b', 'let total = a + b')
+    // `let total = a ` is 14 code points, so the sign is at index 14.
+    assert.deepEqual(spans.before, [[14, 15]], 'only the minus changed on the old side')
+    assert.deepEqual(spans.after, [[14, 15]], 'and the plus on the new side')
+
+    // A pure insertion marks only what arrived.
+    const inserted = internals.changedSpans('abc', 'abcd')
+    assert.deepEqual(inserted.before, [])
+    assert.deepEqual(inserted.after, [[3, 4]])
+
+    // A pure deletion marks only what left.
+    const removed = internals.changedSpans('abcd', 'abc')
+    assert.deepEqual(removed.before, [[3, 4]])
+    assert.deepEqual(removed.after, [])
+
+    // Identical text has nothing to mark, which is what stops a pure rename (or a
+    // whitespace-only edit) from lighting up a whole line.
+    const same = internals.changedSpans('same', 'same')
+    assert.deepEqual(same.before, [])
+    assert.deepEqual(same.after, [])
+  })
+
+  it('skip the character comparison on a line too long to be worth it', () => {
+    const huge = 'x'.repeat(3000)
+    const spans = internals.changedSpans(huge, `${huge}y`)
+    assert.deepEqual(spans, { before: [], after: [] }, 'a minified line is not diffed by character')
+  })
+
+  it('split a line around the changed spans it was given', () => {
+    const parts = internals.splitBySpans('abcde', [[1, 3]])
+    assert.deepEqual(parts, ['a', { text: 'bc', at: 1 }, 'de'])
+    assert.deepEqual(internals.splitBySpans('abc', []), ['abc'])
+  })
+
+  it('highlight the changed characters inside a paired row', () => {
+    const rows = internals.diffRows(
+      ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-let x = a - b', '+let x = a + b', ''].join('\n'),
+    )
+    const tree = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key)
+    const highlighted = []
+    const walk = (node) => {
+      if (node === null || node === undefined) return
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (typeof node !== 'object') return
+      if (node.props?.className === 'lite-git-codeChanged') highlighted.push(node.children)
+      for (const child of node.children ?? []) walk(child)
+    }
+    walk(tree)
+    // The stub turns a bare string child into a `#text` node, so read the text
+    // out of it rather than comparing the node itself.
+    assert.deepEqual(
+      highlighted.map((children) => [].concat(children).map((child) => child?.text ?? child).join('')),
+      ['-', '+'],
+      'exactly the two characters that differ are marked',
+    )
+  })
+
   it('draw a diff as code with a sign column, not as text with + and − glued on', () => {
     const keyed = (key) => key
     const rows = internals.diffRows(

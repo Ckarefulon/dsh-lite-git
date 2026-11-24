@@ -442,6 +442,41 @@ The header card's `+n −n` are counted from the classified rows, not from the
 payload's `added`/`deleted`: a single blob can hold several files, and those two
 numbers are for the whole diff.
 
+**A paired line repeats the colour, a shade stronger.** git's unified format does
+not say which removed line became which added one — it only groups the runs — so
+`pairChangedRows` pairs them by position within a hunk, and `changedSpans` runs a
+character-level LCS over each pair so only the characters that actually differ get
+the stronger background. Two consequences are deliberate:
+
+- a run that removed two lines and added five pairs the first two and leaves the
+  rest unpaired, so their whole row keeps the plain colour — the remaining three
+  have no counterpart to compare against;
+- a line longer than 2000 code points is not compared at all. It is a minified
+  bundle, where a character diff has nothing to say, and the O(n·m) table is not
+  worth building for it.
+
+**A rename git cannot see is paired by content.** `git mv` produces a `2 <new>`
+record with the original path attached. Renaming in a file manager produces
+`.D old` plus `? new`, and drawing that as an edit plus a new file describes work
+the user did not do. `pairUntrackedRenames` matches an unstaged deletion against
+an untracked file whose content is byte-identical, and collapses them into one
+`renamed` entry with `origPath`. The rules are conservative on purpose:
+
+- only a deletion with no replacement on disk is a candidate — a modified file is
+  never a rename source;
+- the content must be *identical*. A rename that also edited the file is
+  genuinely ambiguous (it could be two independent changes), and a wrong answer
+  would hide a deletion;
+- binaries never pair: equal-length binaries are common and comparing them is
+  exactly where a silent wrong answer lives;
+- a pure rename reports `+0 −0`, so the row does not claim the whole file's line
+  count for a file that was only moved.
+
+The pairing is a **display** answer, and `discard` applies the same pairing before
+matching paths — otherwise naming the merged path would match only the untracked
+half and leave the old name deleted. It is expanded back to the raw paths git
+needs before anything is restored or archived.
+
 **The file list's directory is an rtl box around ltr text, and both halves are
 load-bearing.** `direction: rtl` on the directory box is what puts the ellipsis on
 the *left* when it has to truncate (`…/docs/guide.md` beats

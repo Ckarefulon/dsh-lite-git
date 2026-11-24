@@ -29,7 +29,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -279,6 +279,14 @@ async function readState(stateDir, name) {
 async function realStatus(dir) {
   const result = await git(dir, ['status', '--porcelain=v1', '-z'])
   return result.stdout.split('\0').filter((record) => record !== '')
+}
+
+/**
+ * Rename a file the way a file manager does: the filesystem moves it and git is
+ * never told, so `git status` reports a delete plus an untracked file.
+ */
+async function renameFileExternally(dir, from, to) {
+  await rename(join(dir, from), join(dir, to))
 }
 
 // --------------------------------------------------------------------- suite
@@ -750,6 +758,56 @@ async function main() {
     eq('discarding the staged delete is ok', afterDelete.body.ok, true)
     eq('the file is restored', await readFile(join(workspace, 'third.txt'), 'utf8'), 'third file\n')
     eq('and the tree is clean again', (await realStatus(workspace)).length, 0)
+  }
+
+  // ------------------------------------- S11b: a rename made outside of git
+  //
+  // `git mv` tells git what happened; renaming in a file manager does not, and
+  // git reports a delete plus an untracked file. The panel pairs them by content,
+  // the way GitHub Desktop does — so the user sees one rename instead of "you
+  // deleted a file and created another", which is not what they did.
+  section('S11b a rename done in a file manager reads as one rename')
+  {
+    const workspace = await freshRepo('repo-rename-plain')
+    const harness = createHarness({ workspacePath: workspace, stateDir: join(scratch, 'state-11b') })
+
+    // A plain rename: no `git mv`, so git only sees the two halves.
+    await renameFileExternally(workspace, 'third.txt', 'moved third.txt')
+    const before = await realStatus(workspace)
+    // Porcelain v1: ` D path` is an unstaged delete, `?? path` an untracked file.
+    ok(
+      'git really does report a delete and an untracked file',
+      before.some((line) => /^ D /.test(line)) && before.some((line) => line.startsWith('?? ')),
+      before.join(' | '),
+    )
+
+    const status = await harness.call(ACTIONS.STATUS, { sessionId: SESSION })
+    const entry = harness.fileOf(status.body, 'moved third.txt')
+    eq('the pair is reported as one rename', entry?.kind, 'renamed')
+    eq('with the path it came from', entry?.origPath, 'third.txt')
+    eq('a pure rename changes no lines', [entry?.added, entry?.deleted], [0, 0])
+    eq('and the deleted half is not a row of its own', harness.fileOf(status.body, 'third.txt'), undefined)
+    eq('so the list has exactly one change', status.body.files.length, 1)
+
+    // The pairing is a *display* answer: discarding still goes through the real
+    // status, where the delete and the untracked file are two separate records.
+    // Naming the merged path must still undo both halves.
+    const discarded = await harness.call(ACTIONS.DISCARD, { sessionId: SESSION, paths: ['moved third.txt'], hardDelete: false })
+    eq('discarding the merged rename is ok', discarded.body.ok, true)
+    ok('the original name is back', await readFile(join(workspace, 'third.txt'), 'utf8').then(() => true, () => false))
+    ok('the new name is gone', await readFile(join(workspace, 'moved third.txt'), 'utf8').then(() => false, () => true))
+    eq('and discarding it left the tree clean', (await realStatus(workspace)).length, 0)
+
+    // With edited content the pairing is deliberately refused: it could be two
+    // unrelated changes, and guessing would hide a deletion.
+    const edited = await freshRepo('repo-rename-edited')
+    const editedHarness = createHarness({ workspacePath: edited, stateDir: join(scratch, 'state-11c') })
+    await renameFileExternally(edited, 'a.txt', 'renamed.txt')
+    await writeFile(join(edited, 'renamed.txt'), 'completely different content\n', 'utf8')
+    const editedStatus = await editedHarness.call(ACTIONS.STATUS, { sessionId: SESSION })
+    eq('an edited rename stays two rows', editedStatus.body.files.length, 2)
+    ok('the delete is still reported', harness.fileOf(editedStatus.body, 'a.txt')?.kind === 'deleted')
+    ok('and the new file is still untracked', harness.fileOf(editedStatus.body, 'renamed.txt')?.kind === 'untracked')
   }
 
   // ------------------------------------------------------------- S12: conflicts
