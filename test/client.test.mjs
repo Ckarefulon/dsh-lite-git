@@ -970,11 +970,16 @@ describe('pure helpers', () => {
     // Nothing hidden, so nothing to offer: the strip is gone rather than sitting
     // there disabled with "0 lines".
     assert.equal(tree.find((node) => node.props?.['data-lite-git-gap'] !== undefined), undefined)
-    // The three lines are there, and the sectionless hunk below gets its own row
-    // back — otherwise it would vanish along with the strip.
+    // The three lines are there — and the hunk marker above them is *gone* too.
+    // Once the gap is fully open the content is continuous, and a stray `⋯` line
+    // in the middle of an unbroken file is exactly the artefact this avoids.
     const ctx = tree.filter((row) => row.props?.className === 'lite-git-diffRow lite-git-r-ctx')
     assert.equal(ctx.length, 3)
-    assert.equal(tree.filter((node) => node.props?.['data-lite-git-hunk'] !== undefined).length, 2)
+    assert.equal(
+      tree.filter((node) => node.props?.['data-lite-git-hunk'] !== undefined).length,
+      1,
+      'only the first hunk keeps its marker; the fully-expanded one has nothing to mark',
+    )
   })
 
   it('disable a gap button once its edge has reached the other', () => {
@@ -1360,11 +1365,15 @@ describe('the DOM hooks a fixture would need', () => {
   })
 
   it('colour added and removed rows with the theme’s diff tokens, not a hover grey', () => {
-    // The bug this pins: the add/del rows used `--dsw-alias-interactive-bg-hover`
-    // with a green/red `rgba` *fallback*. A theme defines the hover token, so the
-    // fallback never applied and every diff came out grey — plausible-looking CSS
-    // that was wrong in every real theme. `--dsw-alias-code-diff-*` is the shell's
-    // own pair for exactly this.
+    // Three bugs live in this one rule, so it is pinned by name:
+    //   * `--dsw-alias-interactive-bg-hover` with a green/red fallback — a theme
+    //     defines the hover token, so every diff came out grey;
+    //   * `--dsw-alias-file-diff-*-bg`, which is the *file list's* opaque, slightly
+    //     grey green — using it for a line of code is what made the panel look
+    //     muddy;
+    //   * a `color-mix` of the marker colour, which stacked a second tint on an
+    //     already-tinted row.
+    // `--dsw-alias-code-diff-*` is the shell's pair meant for exactly this.
     const env = install()
     const css = env.state.styles[0].textContent
     const rule = (selector) => {
@@ -1372,11 +1381,18 @@ describe('the DOM hooks a fixture would need', () => {
       assert.ok(match !== null, `no rule for ${selector}`)
       return match[1]
     }
-    assert.ok(/background:var\(--dsw-alias-file-diff-added-bg/.test(rule('.lite-git-r-add')), rule('.lite-git-r-add'))
-    assert.ok(/background:var\(--dsw-alias-file-diff-deleted-bg/.test(rule('.lite-git-r-del')), rule('.lite-git-r-del'))
+    assert.ok(/background:var\(--dsw-alias-code-diff-added/.test(rule('.lite-git-r-add')), rule('.lite-git-r-add'))
+    assert.ok(/background:var\(--dsw-alias-code-diff-deleted/.test(rule('.lite-git-r-del')), rule('.lite-git-r-del'))
     // The sign is the theme's marker colour, so a `+` is the green the shell uses.
     assert.ok(css.includes('.lite-git-r-add .lite-git-sign{color:var(--dsw-alias-file-diff-added-marker'), 'the add sign uses the marker token')
     assert.ok(css.includes('.lite-git-r-del .lite-git-sign{color:var(--dsw-alias-file-diff-deleted-marker'), 'the del sign uses the marker token')
+    // The changed characters: the theme's marker colour at one step denser than
+    // the row, not a solid block — a solid fill turns a one-character diff into a
+    // badge, which is louder than the change it points at.
+    assert.ok(
+      /background:color-mix\(in srgb, var\(--dsw-alias-file-diff-added-marker/.test(rule('.lite-git-codeChanged')),
+      rule('.lite-git-codeChanged'),
+    )
     // One background for the whole row: the gutter is *not* tinted separately
     // any more, because two shades for one line put a visible seam between the
     // numbers and the code beside them.
