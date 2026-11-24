@@ -829,6 +829,110 @@ describe('pure helpers', () => {
     )
   })
 
+  it('work out how many lines each gap between hunks left out', () => {
+    const rows = internals.diffRows(
+      [
+        'diff --git a/a.txt b/a.txt',
+        '--- a/a.txt',
+        '+++ b/a.txt',
+        '@@ -1,3 +1,3 @@',
+        ' one',
+        '-two',
+        '+TWO',
+        '@@ -10,2 +10,2 @@',
+        '-ten',
+        '+TEN',
+        '',
+      ].join('\n'),
+    )
+    const gaps = internals.diffGaps(rows)
+    // The first hunk covers old lines 1..3; the second starts at old line 10, so
+    // lines 4..9 were skipped — six of them.
+    assert.deepEqual(
+      gaps.map((gap) => [gap.from, gap.to]),
+      [[4, 9]],
+    )
+    assert.equal(gaps[0].before, rows.findIndex((row) => row.kind === 'hunk' && row.text.includes('-10,2')), 'it is drawn above the hunk it belongs to')
+
+    // Adjacent hunks have nothing between them, so there is no strip to draw.
+    const adjacent = internals.diffRows(
+      ['diff --git a/b.txt b/b.txt', '--- a/b.txt', '+++ b/b.txt', '@@ -1,2 +1,2 @@', '-a', '+A', '@@ -3,2 +3,2 @@', '-c', '+C', ''].join('\n'),
+    )
+    assert.deepEqual(internals.diffGaps(adjacent), [])
+
+    // One hunk, or none, has no gap at all.
+    assert.deepEqual(internals.diffGaps(internals.diffRows('diff --git a/c b/c\n--- a/c\n+++ b/c\n@@ -1 +1 @@\n-a\n+b\n')), [])
+    assert.deepEqual(internals.diffGaps([]), [])
+
+    // A gap belongs to one file. Crossing into the next file must not produce a
+    // strip that claims to open lines of it: the first hunk of the second file
+    // is not preceded by a region of *that* file.
+    const twoFiles = internals.diffRows(
+      [
+        'diff --git a/one.txt b/one.txt',
+        '--- a/one.txt',
+        '+++ b/one.txt',
+        '@@ -1,2 +1,2 @@',
+        '-a',
+        '+A',
+        'diff --git a/two.txt b/two.txt',
+        '--- a/two.txt',
+        '+++ b/two.txt',
+        '@@ -30,2 +30,2 @@',
+        '-b',
+        '+B',
+        '',
+      ].join('\n'),
+    )
+    assert.deepEqual(internals.diffGaps(twoFiles), [], 'the file boundary is not a gap')
+  })
+
+  it('draw a pressable strip for a gap, and the lines once it is open', () => {
+    const rows = internals.diffRows(
+      ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-a', '+A', '@@ -20 +20 @@', '-t', '+T', ''].join('\n'),
+    )
+    const pressed = []
+    const closed = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key, {
+      gapOpen: () => false,
+      gapLines: () => undefined,
+      onGap: (gap) => pressed.push([gap.from, gap.to]),
+    })
+    const strip = closed.find((node) => node.props?.['data-lite-git-gap'] !== undefined)
+    assert.ok(strip !== undefined, 'the folded gap has a strip')
+    assert.equal(strip.props['data-lite-git-gap'], '2-19', 'old lines 2..19 were left out (18 of them)')
+    assert.equal(strip.props['aria-expanded'], 'false')
+    // Pressing it asks for exactly that range.
+    strip.props.onClick()
+    assert.deepEqual(pressed, [[2, 19]])
+
+    // Open: the lines are drawn, and each carries the same number on both sides.
+    const open = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key, {
+      gapOpen: () => true,
+      gapLines: () => ['x', 'y'],
+      onGap: () => {},
+    })
+    const openedStrip = open.find((node) => node.props?.['data-lite-git-gap'] !== undefined)
+    assert.equal(openedStrip.props['aria-expanded'], 'true')
+    // The gap's rows are ordinary context rows sitting right after the strip.
+    const stripAt = open.indexOf(openedStrip)
+    const after = open.slice(stripAt + 1, stripAt + 3)
+    assert.deepEqual(
+      after.map((node) => node.props?.className),
+      ['lite-git-diffRow lite-git-r-ctx', 'lite-git-diffRow lite-git-r-ctx'],
+      'two context rows follow the open strip',
+    )
+    // Each one numbers the same line on both sides: the run is identical there.
+    for (const [offset, row] of after.entries()) {
+      const cells = row.children
+      assert.deepEqual(
+        cells[0].children.map((cell) => textOf(cell)),
+        [String(2 + offset), String(2 + offset), ''],
+        `line ${2 + offset} is numbered the same in both gutters`,
+      )
+      assert.equal(textOf(cells[1]), offset === 0 ? 'x' : 'y')
+    }
+  })
+
   it('draw a diff as code with a sign column, not as text with + and − glued on', () => {
     const keyed = (key) => key
     const rows = internals.diffRows(

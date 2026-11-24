@@ -760,6 +760,61 @@ async function main() {
     eq('and the tree is clean again', (await realStatus(workspace)).length, 0)
   }
 
+  // ------------------------------- S6b: hiding whitespace, expanding context
+  section('S6b hide whitespace changes, and expand the lines between hunks')
+  {
+    const workspace = await freshRepo('repo-diff-whitespace')
+    const harness = createHarness({ workspacePath: workspace, stateDir: join(scratch, 'state-6b') })
+
+    // A change that is entirely whitespace: `-w` must make it vanish.
+    await put(join(workspace, 'a.txt'), '  one\nTWO\nfive\n')
+    const plain = await harness.call(ACTIONS.FILE_DIFF, { sessionId: SESSION, path: 'a.txt' })
+    eq('with whitespace shown, the file has a change', plain.body.diff.text !== '', true)
+    ok('and the change is the indentation', plain.body.diff.text.includes('-one') && plain.body.diff.text.includes('+  one'))
+
+    const ignored = await harness.call(ACTIONS.FILE_DIFF, { sessionId: SESSION, path: 'a.txt', ignoreWhitespace: true })
+    eq('with whitespace hidden, only the real edit is left', ignored.body.diff.text.includes('-one'), false)
+    eq('and the edit that is not whitespace survives', ignored.body.diff.text.includes('TWO'), true)
+
+    // Expanding the context: a change near the top and one near the bottom leave
+    // a gap between them, and asking for that gap must return its real lines.
+    // The file has to be *committed* first — the expansion reads the unchanged
+    // lines out of HEAD, which is where they are identical on both sides.
+    const long = Array.from({ length: 60 }, (_, index) => `line ${index + 1}`)
+    await put(join(workspace, 'long.txt'), `${long.join('\n')}\n`)
+    await git(workspace, ['add', 'long.txt'])
+    await git(workspace, ['commit', '-q', '-m', 'long'])
+
+    const edited = [...long]
+    edited[1] = 'LINE 2'
+    edited[58] = 'LINE 59'
+    await put(join(workspace, 'long.txt'), `${edited.join('\n')}\n`)
+
+    const diff = await harness.call(ACTIONS.FILE_DIFF, { sessionId: SESSION, path: 'long.txt' })
+    eq('the two edits are two hunks', (diff.body.diff.text.match(/^@@ /gm) ?? []).length, 2)
+
+    const context = await harness.call(ACTIONS.FILE_CONTEXT, { sessionId: SESSION, path: 'long.txt', from: 4, to: 8 })
+    eq('the gap comes back', context.body.ok, true)
+    eq('with the lines it covers', context.body.context.lines, ['line 4', 'line 5', 'line 6', 'line 7', 'line 8'])
+    eq('and says which range it answered', [context.body.context.from, context.body.context.to], [4, 8])
+
+    // Asking past the end is clamped rather than an error: the diff that produced
+    // the request is allowed to be one refresh stale.
+    const clamped = await harness.call(ACTIONS.FILE_CONTEXT, { sessionId: SESSION, path: 'long.txt', from: 58, to: 999 })
+    eq('a range past the end is clamped to the file', clamped.body.context.lines.length, 3)
+    eq('and the answered range is the clamped one', clamped.body.context.to, 60)
+
+    // A file HEAD does not have has no unchanged lines: an empty answer, not a
+    // failure the user cannot act on.
+    await put(join(workspace, 'brand new.txt'), 'x\n')
+    const missing = await harness.call(ACTIONS.FILE_CONTEXT, { sessionId: SESSION, path: 'brand new.txt', from: 1, to: 5 })
+    eq('a file with no HEAD version answers empty', missing.body.context.lines, [])
+
+    const bad = await harness.call(ACTIONS.FILE_CONTEXT, { sessionId: SESSION, path: 'long.txt', from: 9, to: 3 })
+    eq('an inverted range is refused', bad.body.ok, false)
+    eq('with a bad-request code', bad.body.error.code, ERROR_CODES.BAD_REQUEST)
+  }
+
   // ------------------------------------- S11b: a rename made outside of git
   //
   // `git mv` tells git what happened; renaming in a file manager does not, and

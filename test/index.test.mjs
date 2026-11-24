@@ -278,6 +278,7 @@ describe('the action surface', () => {
       'commitAndPush',
       'discard',
       'fetch',
+      'fileContext',
       'fileDiff',
       'openFile',
       'openers',

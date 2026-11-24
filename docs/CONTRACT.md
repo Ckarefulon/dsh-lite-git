@@ -485,6 +485,40 @@ matching paths — otherwise naming the merged path would match only the untrack
 half and leave the old name deleted. It is expanded back to the raw paths git
 needs before anything is restored or archived.
 
+**Expanding the context is per gap, and that is a protocol decision.** Two hunks
+leave a run of unchanged lines between them, and the `@@` coordinates say exactly
+how many: the next old-side start minus the previous old-side end. `diffGaps`
+computes that range, and pressing its strip asks the host for that range only
+(`fileContext`, 1-based and inclusive in old-file lines).
+
+The alternative — re-running the diff with `-U<n>` — widens *every* gap at once,
+which is not the gesture: the user pressed one strip. It would also move every
+line number below it, so the rows already on screen would shift for a reason the
+user did not ask for. Asking for the range keeps the rest of the diff stable.
+
+Two details follow from the gap being *identical on both sides* — which is why it
+is a gap at all:
+
+- the host sends **one** text, and the renderer draws the same number in both
+  gutter columns;
+- a file with no version in HEAD (a new file) has no unchanged lines to expand
+  into, so the answer is empty rather than an error the user cannot act on. The
+  range is clamped to the file for the same reason: the diff that produced the
+  request is allowed to be one refresh stale.
+
+`diffGaps` resets at every `file` row. Without that, the first hunk of a second
+file reads as "starting after where the previous file ended", and the tab offers
+to expand lines that were never skipped — which is what a screenshot caught
+before it reached a release.
+
+**Hiding whitespace is `git diff -w`, not a client-side filter.** The client has
+the diff text, not the two versions of the file, so it could only guess which
+lines differ by whitespace alone. The host runs the same command with `-w` and
+sends whatever comes back, so the totals and the hunk boundaries stay consistent
+with what is drawn. The toggle lives per tab rather than in `Config`: it is a way
+of reading one diff, not a setting for how diffs are read, and it is re-applied
+whenever the diff is re-read.
+
 **The file list's directory is an rtl box around ltr text, and both halves are
 load-bearing.** `direction: rtl` on the directory box is what puts the ellipsis on
 the *left* when it has to truncate (`…/docs/guide.md` beats
