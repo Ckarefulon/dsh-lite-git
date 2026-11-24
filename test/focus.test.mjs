@@ -382,10 +382,17 @@ function createPanel(options = {}) {
      * the same gesture for one row, but the range has to know which row the
      * pointer landed on, and the row is the thing that carries that.
      */
+    /**
+     * Press a row's tick — the checkbox, which is the only control that changes a
+     * file's state.
+     *
+     * `shift` is passed through because a Shift-range is a range *of ticks*: the
+     * gesture starts and ends on the boxes, not on the rows around them.
+     */
     async clickRow(path, options = {}) {
-      const row = runtime.elements().find((host) => host.props['data-lite-git-row'] === path)
-      assert.ok(row !== undefined, `the row for ${path} is rendered`)
-      row.props.onClick({ shiftKey: options.shift === true })
+      const tick = runtime.elements().find((host) => host.props['data-lite-git-tick'] === path)
+      assert.ok(tick !== undefined, `the tick for ${path} is rendered`)
+      tick.props.onClick({ shiftKey: options.shift === true, stopPropagation() {} })
       await runtime.pump(`click ${path}`)
     },
     /** Let Shift go: the batch is over and the next press starts a new one. */

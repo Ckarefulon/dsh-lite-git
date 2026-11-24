@@ -1013,6 +1013,32 @@ describe('the components without hooks', () => {
     assert.ok(!textOf(tree).includes('file-10.txt'))
   })
 
+  it('accept a press on the tick, and nothing else in the row', () => {
+    const calls = []
+    const tree = ChangeRow({
+      file: { path: 'a.txt', kind: 'modified', added: 1, deleted: 0 },
+      ticked: false,
+      t: plainT,
+      onToggle: (file, shift) => calls.push(['toggle', file.path, shift]),
+      onDiscard: () => {},
+      onOpen: () => {},
+    })
+    const row = withAttr(tree, 'data-lite-git-row')
+
+    // The row itself has no single-click handler at all. This is the rule the
+    // user asked for: reading a list means pointing at it, and a press that
+    // happened to land on a path must not tick the file.
+    assert.equal(row.props.onClick, undefined, 'a press on the row does nothing')
+    assert.equal(typeof row.props.onDoubleClick, 'function', 'double-click still opens the diff')
+
+    // The tick is where the state changes, and Shift is read there.
+    const tick = withAttr(tree, 'data-lite-git-tick')
+    tick.props.onClick({ stopPropagation() {} })
+    assert.deepEqual(calls, [['toggle', 'a.txt', false]])
+    tick.props.onClick({ stopPropagation() {}, shiftKey: true })
+    assert.deepEqual(calls.at(-1), ['toggle', 'a.txt', true], 'a Shift-press on the tick starts a range')
+  })
+
   it('render nothing at all when there is no confirmation pending', () => {
     assert.equal(DiscardDialog({ pending: null, t: plainT, onCancel: () => {}, onHardDeleteChange: () => {}, onConfirm: () => {}}), null)
   })

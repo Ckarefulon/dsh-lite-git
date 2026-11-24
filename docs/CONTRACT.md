@@ -264,6 +264,14 @@ arrives:
 Nothing about this can spin, because no request is involved: a click is a state
 update, and the only git process a commit starts is its own.
 
+**The tick is the only control that changes a file's state.** A single press on the
+row — the path, the line counts, the space beside them — is deliberately inert: the
+list is read by pointing at it, and a press that happens to land on a path must not
+commit that file to the next commit. Double-clicking the row still opens its diff,
+which is the one row-level gesture, and it is a different button count so the two
+cannot be confused. The Shift range is a range *of ticks* for the same reason: it
+starts on a checkbox and ends on one.
+
 **The Shift range is one gesture with one snapshot.** A press on a row with Shift
 held ranges from the *anchor* (the row the previous press landed on) to this one
 and **inverts** every row in between against how the list looked when the batch
