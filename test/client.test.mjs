@@ -940,34 +940,66 @@ describe('pure helpers', () => {
     // 58 hidden, 40 shown: the text says how many are left.
     assert.equal(textOf(strip.children[1]), 'diff.gapRemaining')
 
-    // 40 context rows come after the strip, top edge first then bottom edge.
+    // 40 context rows: the 20 pulled down, then the strip, then the 20 pulled up.
+    // The strip is *between* them because it stands for the part still hidden —
+    // it is not pinned above the lines it was supposed to be standing in for.
     const stripAt = tree.indexOf(strip)
-    const after = tree.slice(stripAt + 1, stripAt + 41)
-    assert.equal(after.length, 40)
-    assert.ok(after.every((row) => row.props?.className === 'lite-git-diffRow lite-git-r-ctx'))
-    // The first is the topmost pulled-down line, the last is the bottom-most
-    // pulled-up one, and they meet in the middle.
+    const isCtx = (row) => row.props?.className === 'lite-git-diffRow lite-git-r-ctx'
+    const above = tree.slice(0, stripAt).filter(isCtx)
+    const below = tree.slice(stripAt + 1).filter(isCtx)
+    assert.equal(above.length, 20, '20 lines above the strip')
+    assert.equal(below.length, 20, 'and 20 below it')
+    // Downwards from the top: 2..21. Upwards from the bottom: 40..59.
     const gutterOf = (row) => row.children[0].children[0]
-    assert.equal(textOf(gutterOf(after[0])), '2')
-    assert.equal(textOf(gutterOf(after[19])), '21')
-    assert.equal(textOf(gutterOf(after[20])), '40')
-    assert.equal(textOf(gutterOf(after[39])), '59')
+    assert.equal(textOf(gutterOf(above[0])), '2')
+    assert.equal(textOf(gutterOf(above[19])), '21')
+    assert.equal(textOf(gutterOf(below[0])), '40')
+    assert.equal(textOf(gutterOf(below[19])), '59')
   })
 
-  it('disable a gap button once its edge has reached the other', () => {
+  it('drop the strip once nothing is left hidden', () => {
     const rows = internals.diffRows(
-      ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-a', '+A', '@@ -4 +4 @@', '-t', '+T', ''].join('\n'),
+      ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-a', '+A', '@@ -5 +5 @@', '-t', '+T', ''].join('\n'),
     )
-    // A three-line gap, fully pulled in from below: the down button has nothing
-    // left to give, and the up button has nothing either.
+    // A three-line gap (2..4), fully pulled in from below.
     const tree = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key, {
       gapState: () => ({ down: 0, up: 3 }),
       gapLines: () => ({ 2: 'x', 3: 'y', 4: 'z' }),
       onGap: () => {},
     })
-    const strip = tree.find((node) => node.props?.['data-lite-git-gap'] !== undefined)
-    assert.equal(strip.children[0].children[0].props.disabled, true, 'down has nothing left')
-    assert.equal(strip.children[0].children[1].props.disabled, true, 'and neither does up')
+    // Nothing hidden, so nothing to offer: the strip is gone rather than sitting
+    // there disabled with "0 lines".
+    assert.equal(tree.find((node) => node.props?.['data-lite-git-gap'] !== undefined), undefined)
+    // The three lines are there, and the sectionless hunk below gets its own row
+    // back — otherwise it would vanish along with the strip.
+    const ctx = tree.filter((row) => row.props?.className === 'lite-git-diffRow lite-git-r-ctx')
+    assert.equal(ctx.length, 3)
+    assert.equal(tree.filter((node) => node.props?.['data-lite-git-hunk'] !== undefined).length, 2)
+  })
+
+  it('disable a gap button once its edge has reached the other', () => {
+    const rows = internals.diffRows(
+      ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-a', '+A', '@@ -5 +5 @@', '-t', '+T', ''].join('\n'),
+    )
+    const stripWith = (state) =>
+      internals
+        .renderDiffRows(rows, new Map(), null, () => {}, (key) => key, {
+          gapState: () => state,
+          gapLines: () => ({}),
+          onGap: () => {},
+        })
+        .find((node) => node.props?.['data-lite-git-gap'] !== undefined)
+
+    // A three-line gap (2..4), pulled in from both ends. Each button can reach as
+    // far as the other edge, so both stay live until the gap is full.
+    const partial = stripWith({ down: 1, up: 1 })
+    assert.equal(partial.children[0].children[0].props.disabled, false)
+    assert.equal(partial.children[0].children[1].props.disabled, false, 'one line is still free for each edge')
+
+    // Full from below: the up button is done, and the strip itself is gone
+    // because nothing is hidden — which is the other half of this rule.
+    const full = stripWith({ down: 0, up: 3 })
+    assert.equal(full, undefined, 'a full gap has no strip to press')
   })
 
   it('let the gap strip replace the ellipsis, never draw both', () => {
