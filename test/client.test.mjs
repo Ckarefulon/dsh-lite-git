@@ -970,6 +970,35 @@ describe('pure helpers', () => {
     assert.equal(strip.children[0].children[1].props.disabled, true, 'and neither does up')
   })
 
+  it('let the gap strip replace the ellipsis, never draw both', () => {
+    // A bare hunk with no section heading used to render a `⋯` row, and a gap on
+    // the same hunk added a strip in front of it — two rows for one fact, and the
+    // hunk below shifted down by a line. One or the other, never both.
+    const rows = internals.diffRows(
+      ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-a', '+A', '@@ -20 +20 @@', '-t', '+T', ''].join('\n'),
+    )
+    const tree = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key, {
+      gapState: () => undefined,
+      gapLines: () => undefined,
+      onGap: () => {},
+    })
+    const strips = tree.filter((node) => node.props?.['data-lite-git-gap'] !== undefined)
+    assert.equal(strips.length, 1, 'one strip for the one gap')
+    // The second hunk has no section text, so it is not drawn at all: the strip
+    // above it already says the lines are missing.
+    const hunks = tree.filter((node) => node.props?.['data-lite-git-hunk'] !== undefined)
+    assert.equal(hunks.length, 1, 'the second, sectionless hunk is not an extra row')
+    // The one that survives is the first hunk, which has no gap above it — so it
+    // still draws its own `⋯`, and that is correct: nothing else is saying the
+    // file starts here.
+    assert.ok(hunks[0].props['data-lite-git-hunk'].startsWith('@@ -1'), hunks[0].props['data-lite-git-hunk'])
+
+    // Without expansion the ellipsis is still what a sectionless hunk draws —
+    // the trash view and the tests depend on the plain shape.
+    const plain = internals.renderDiffRows(rows, new Map(), null, () => {}, (key) => key)
+    assert.equal(plain.filter((node) => node.props?.['data-lite-git-hunk'] !== undefined).length, 2)
+  })
+
   it('draw a diff as code with a sign column, not as text with + and − glued on', () => {
     const keyed = (key) => key
     const rows = internals.diffRows(
